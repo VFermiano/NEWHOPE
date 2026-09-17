@@ -1,0 +1,17 @@
+raw_dir: data/raw
+output_dir: data/processed
+manifest_path: data/pipeline_state.json
+n_workers: 4
+
+reduction:
+  dark_dir: data/calib/darks
+  flat_dir: data/calib/flats
+  filters: [JX, HX, KXs]
+
+astrometry:
+  scamp_config_path: configs/scamp/default.scamp
+  timeout_seconds: 120
+
+photometry:
+  vvv_catalog_path: data/calib/vvv_catalog.fits
+  fwhm_pixels: 4.0

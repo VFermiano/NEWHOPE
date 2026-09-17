@@ -1,0 +1,28 @@
+[project]
+name = "newfirm-pipeline"
+version = "0.1.0"
+description = "Professional OOP pipeline for NEWFIRM reduction, astrometry, and photometry"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "astropy",
+    "photutils",
+    "scipy",
+    "pyyaml",
+    "pydantic>=2",
+    "typer",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "black", "ruff"]
+
+[project.scripts]
+newfirm-pipeline = "newfirm_pipeline.cli:app"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
