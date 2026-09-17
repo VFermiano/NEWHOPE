@@ -1,4 +1,4 @@
-from newfirm_pipeline.core.state import PipelineState
+from newhope_pipeline.core.state import PipelineState
 
 
 def test_state_roundtrip(tmp_path):

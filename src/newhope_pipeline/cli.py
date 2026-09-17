@@ -1,7 +1,7 @@
 """Command-line entry point.
 
 Usage:
-    newfirm-pipeline run --config-path configs/default.yaml
+    newhope-pipeline --config-path configs/default.yaml
 """
 from __future__ import annotations
 

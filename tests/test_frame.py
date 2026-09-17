@@ -1,6 +1,6 @@
 import numpy as np
 
-from newfirm_pipeline.core.frame import Frame, FrameCollection
+from newhope_pipeline.core.frame import Frame, FrameCollection
 
 
 def test_frame_from_fits(synthetic_frame_file):

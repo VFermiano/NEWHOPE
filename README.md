@@ -1,4 +1,4 @@
-# newfirm-pipeline
+# NEWHOPE
 
 Object-oriented reduction, astrometry, and photometry pipeline for NEWFIRM
 near-infrared imaging data.
@@ -27,11 +27,11 @@ pytest -q
 ## Run the pipeline
 
 ```bash
-newfirm-pipeline --config-path configs/default.yaml
+newhope-pipeline --config-path configs/default.yaml
 ```
 
 (Will fail until at least one reduction stage's `process()` is filled in --
-see `src/newfirm_pipeline/reduction/dark.py`.)
+see `src/newhope_pipeline/reduction/dark.py`.)
 
 ## Migration order
 
