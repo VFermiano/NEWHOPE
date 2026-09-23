@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2",
     "typer",
     "tqdm",
+    "requests",
 ]
 
 [project.optional-dependencies]

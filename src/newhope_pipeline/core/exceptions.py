@@ -24,3 +24,7 @@ class ScampTimeoutError(AstrometryError):
 
 class PhotometryError(PipelineError):
     """Raised when PSF photometry or VVV catalog calibration fails on a frame."""
+
+
+class AcquisitionError(PipelineError):
+    """Raised when downloading raw data (e.g. from the NOIRLab archive) fails."""
