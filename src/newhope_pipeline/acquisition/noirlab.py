@@ -44,6 +44,7 @@ import hashlib
 import json
 import logging
 import os
+from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -140,6 +141,7 @@ class NoirlabClient:
 
     def __init__(self) -> None:
         self.session: Optional[requests.Session] = None
+        self.token: Optional[str] = None
 
     def verify_api(self) -> None:
         resp = requests.get(f"{NATROOT}/api/version", timeout=15)
@@ -164,7 +166,12 @@ class NoirlabClient:
         token = str(token).strip()
 
         session = requests.Session()
-        session.headers.update({"Authorization": f"Bearer {token}"})
+        # Keep the archive token for file retrieval, but do not attach it to
+        # advanced-search requests. The API currently accepts public metadata
+        # searches without auth, while authenticated search POSTs are routed
+        # through CSRF-protected session handling and fail with HTTP 403.
+        session.headers.update({"Referer": NATROOT})
+        self.token = token
         self.session = session
         logger.info("Login OK.")
 
@@ -180,7 +187,14 @@ class NoirlabClient:
         session = self._require_session()
         query = {"outfields": OUTFIELDS, "search": search_clauses}
         url = f"{ADSURL}/find/?rectype={rectype}&limit={limit}"
-        resp = session.post(url, json=query, timeout=120)
+        auth_header = None
+        if isinstance(getattr(session, "headers", None), MutableMapping):
+            auth_header = session.headers.pop("Authorization", None)
+        try:
+            resp = session.post(url, json=query, timeout=120)
+        finally:
+            if auth_header is not None:
+                session.headers["Authorization"] = auth_header
         if resp.status_code != 200:
             try:
                 msg = resp.json().get("errorMessage", resp.text)
@@ -243,6 +257,8 @@ class NoirlabClient:
             logger.info("[redo] %s (exists but checksum mismatch)", filename)
 
         url = row.get("url") or f"{NATROOT}/api/retrieve/{row['md5sum']}/"
+        if not session.headers.get("Authorization") and self.token:
+            session.headers["Authorization"] = f"Bearer {self.token}"
 
         for attempt in range(2):
             resp = session.get(url, stream=True, timeout=180)
@@ -268,7 +284,7 @@ class NoirlabClient:
         self, rows: list[tuple[str, dict]], outdir: Path
     ) -> DownloadResult:
         result = DownloadResult()
-        for r in rows:
+        for _kind, r in rows:
             sub = outdir
             if self.download_file(r, sub):
                 result.downloaded += 1

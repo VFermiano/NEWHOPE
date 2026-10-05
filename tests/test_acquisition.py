@@ -45,6 +45,18 @@ def test_search_http_error_raises_acquisition_error():
         client.search_science("newfirm", "ct4m", "2019A-0305", "2019-06-07", "raw", 5000)
 
 
+def test_search_temporarily_removes_authorization_header():
+    client = NoirlabClient()
+    client.session = MagicMock()
+    client.session.headers = {"Authorization": "Bearer sometoken", "Referer": "https://astroarchive.noirlab.edu"}
+    client.session.post.return_value = _mock_response(json_data=[{"meta": True}])
+
+    client.search_science("newfirm", "ct4m", "2019A-0305", "2019-06-07", "raw", 5000)
+
+    assert client.session.post.call_args.kwargs["json"]["search"][0] == ["instrument", "newfirm"]
+    assert client.session.headers["Authorization"] == "Bearer sometoken"
+
+
 def test_download_file_skips_when_checksum_matches(tmp_path):
     client = NoirlabClient()
     client.session = MagicMock()
@@ -78,6 +90,22 @@ def test_download_file_flips_auth_scheme_on_401(tmp_path):
 
     assert ok is True
     assert client.session.headers["Authorization"].startswith("Token")
+
+
+def test_download_file_uses_stored_token(tmp_path):
+    client = NoirlabClient()
+    client.session = MagicMock()
+    client.session.headers = {}
+    client.token = "sometoken"
+    success = _mock_response(status_code=200)
+    success.iter_content.return_value = [b"data"]
+    client.session.get.return_value = success
+
+    row = {"archive_filename": "frame.fits", "md5sum": None}
+    ok = client.download_file(row, tmp_path)
+
+    assert ok is True
+    assert client.session.headers["Authorization"] == "Bearer sometoken"
 
 
 def test_download_night_requires_proposal_and_night():
