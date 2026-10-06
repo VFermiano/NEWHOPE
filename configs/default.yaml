@@ -21,8 +21,8 @@ photometry:
 acquisition:
   instrument: newfirm
   telescope: ct4m
-  proposal: 2025A-599150
-  night: "2025-05-13"
+#  proposal: 2025A-599150
+#  night: "2025-05-13"
   proctype: raw
   limit: 5000
   skip_calibrations: false

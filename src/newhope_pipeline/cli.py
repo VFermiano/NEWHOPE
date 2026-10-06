@@ -18,12 +18,15 @@ from .core.pipeline import Pipeline
 from .reduction.dark import DarkSubtraction
 from .reduction.flat import FlatFielding
 from .reduction.sky import SkySubtraction
+from newhope_pipeline import config
 
 app = typer.Typer()
 
 
 @app.command()
 def download(
+    night: str = typer.Option(...,"--night", help="Observing night, YYYY-MM-DD"),
+    proposal: str = typer.Option(..., "--proposal", help="Proposal ID, e.g."),
     config_path: Path = typer.Option(Path("configs/default.yaml")),
     dry_run: bool = typer.Option(False, help="List matches without downloading"),
     set_credentials: bool = typer.Option(
@@ -42,6 +45,8 @@ def download(
         return
 
     config = PipelineConfig.from_yaml(config_path)
+    config.acquisition.night = night
+    config.acquisition.proposal = proposal
     if config.acquisition is None:
         raise typer.BadParameter(f"No `acquisition:` section found in {config_path}.")
 
