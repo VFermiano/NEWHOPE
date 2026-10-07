@@ -27,20 +27,32 @@ pytest -q
 ## Downloading raw data
 
 If your raw frames aren't on disk yet, `newhope-pipeline` can pull them
-from the NOIRLab Astro Data Archive first. Fill in the `acquisition:`
-section of your config (instrument, telescope, proposal, night -- see
-`configs/default.yaml`), then either:
+from the NOIRLab Astro Data Archive first. Pass a base directory and the
+pipeline creates one run folder per proposal+night inside it, and uses that
+same folder for the whole reduction:
+
+```
+<base-dir>/<proposal>_<night>/
+    raw/                    <- download target, reduction input
+    processed/              <- reduction output
+    pipeline_state.json     <- resume manifest
+```
+
+Instrument/telescope/etc. come from the `acquisition:` section of your
+config (see `configs/default.yaml`); `--proposal`/`--night` on the command
+line override it. `base_dir` in the config is only the default for
+`--base-dir`. Then either:
 
 ```bash
 # one-time: store your archive login (or set NOIRLAB_EMAIL / NOIRLAB_PASSWORD instead)
 newhope-pipeline download --set-credentials
 
 # download only
-newhope-pipeline download --config-path configs/default.yaml
-newhope-pipeline download --config-path configs/default.yaml --dry-run  # list matches first
+newhope-pipeline download --base-dir /data/newfirm --proposal 2025A-599150 --night 2025-05-13
+newhope-pipeline download --base-dir /data/newfirm --proposal 2025A-599150 --night 2025-05-13 --dry-run  # list matches first
 
 # or download, then run the pipeline in one go
-newhope-pipeline run --config-path configs/default.yaml --download
+newhope-pipeline run --base-dir /data/newfirm --proposal 2025A-599150 --night 2025-05-13 --download
 ```
 
 This fetches every science image for that proposal/night plus same-night
@@ -48,12 +60,13 @@ darks/flats for that instrument+telescope (calibrations are archive-wide,
 not tied to a single proposal), verifying checksums on re-runs so it's
 safe to interrupt and resume. See `src/newhope_pipeline/acquisition/noirlab.py`
 for the credential lookup order and auth details; `acquisition:` is
-optional -- omit it and populate `raw_dir` yourself if you don't need it.
+optional -- omit it and put your frames in `<base-dir>/<proposal>_<night>/raw/` yourself.
 
 ## Run the pipeline
 
 ```bash
-newhope-pipeline run --config-path configs/default.yaml
+# same --base-dir/--proposal/--night as the download -> same run folder
+newhope-pipeline run --base-dir /data/newfirm --proposal 2025A-599150 --night 2025-05-13
 ```
 
 (Will fail until at least one reduction stage's `process()` is filled in --

@@ -1,11 +1,13 @@
-raw_dir: data/raw
-output_dir: data/processed
-manifest_path: data/pipeline_state.json
+# Parent directory for all runs. Override with --base-dir on the CLI.
+# Each proposal+night gets its own folder inside it:
+#   <base_dir>/<proposal>_<night>/{raw/, processed/, pipeline_state.json}
+base_dir: data
 n_workers: 4
 
 reduction:
-  dark_dir: data/
-  flat_dir: data/
+  # dark_dir / flat_dir default to the run's raw/ directory; uncomment to override.
+  # dark_dir: data/calib/darks
+  # flat_dir: data/calib/flats
   filters: [JX, HX, KXs]
 
 astrometry:
@@ -17,7 +19,7 @@ photometry:
   fwhm_pixels: 4.0
 
 # Optional -- only needed for `newhope-pipeline download` / `run --download`.
-# Downloads land in raw_dir above.
+# Downloads land in <base_dir>/<proposal>_<night>/raw/.
 acquisition:
   instrument: newfirm
   telescope: ct4m
