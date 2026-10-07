@@ -10,9 +10,9 @@ This module runs *before* there's a FrameCollection to build -- it's
 not a PipelineStage. The usual flow is:
 
     cfg = PipelineConfig.from_yaml(config_path)
-    if cfg.acquisition:
-        download_night(cfg.acquisition, outdir=cfg.raw_dir)
-    frames = FrameCollection.from_directory(cfg.raw_dir)
+    paths = cfg.resolve_paths(proposal, night, base_dir=base_dir, create=True)
+    download_night(cfg.acquisition, outdir=paths.raw_dir)
+    frames = FrameCollection.from_directory(paths.raw_dir)
     ...
 
 --------------------------------------------------------------------
@@ -44,7 +44,9 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from collections.abc import MutableMapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -82,6 +84,9 @@ OUTFIELDS = [
 ]
 
 CREDENTIALS_FILE = Path.home() / ".noirlab_credentials.json"
+
+# Parallel download connections (like `lftp`'s `mirror --parallel=4`).
+DEFAULT_WORKERS = 4
 
 
 @dataclass
@@ -142,6 +147,9 @@ class NoirlabClient:
     def __init__(self) -> None:
         self.session: Optional[requests.Session] = None
         self.token: Optional[str] = None
+        # download_file() runs in several threads sharing one Session; this
+        # guards the Authorization header, which is the only shared mutable state.
+        self._auth_lock = threading.Lock()
 
     def verify_api(self) -> None:
         resp = requests.get(f"{NATROOT}/api/version", timeout=15)
@@ -257,54 +265,91 @@ class NoirlabClient:
             logger.info("[redo] %s (exists but checksum mismatch)", filename)
 
         url = row.get("url") or f"{NATROOT}/api/retrieve/{row['md5sum']}/"
-        if not session.headers.get("Authorization") and self.token:
-            session.headers["Authorization"] = f"Bearer {self.token}"
+        with self._auth_lock:
+            if not session.headers.get("Authorization") and self.token:
+                session.headers["Authorization"] = f"Bearer {self.token}"
+
+        # Write to a .part file and rename on success, so an interrupted or
+        # failed download never leaves a truncated file under the real name.
+        tmp_path = dest_path.with_name(dest_path.name + ".part")
 
         for attempt in range(2):
+            used_auth = session.headers.get("Authorization")
             resp = session.get(url, stream=True, timeout=180)
             if resp.status_code == 200:
-                with open(dest_path, "wb") as f:
+                with open(tmp_path, "wb") as f:
                     for chunk in resp.iter_content(chunk_size):
                         f.write(chunk)
+                tmp_path.replace(dest_path)
                 size_mb = dest_path.stat().st_size / 1e6
                 logger.info("[ok]   %s  (%.1f MB)", filename, size_mb)
                 return True
             if resp.status_code in (401, 403) and attempt == 0:
-                # First failure: flip the auth scheme once and retry.
-                current = session.headers.get("Authorization", "")
-                token = current.split(" ", 1)[-1]
-                alt_scheme = "Token" if current.startswith("Bearer") else "Bearer"
-                session.headers["Authorization"] = f"{alt_scheme} {token}"
+                # First failure: flip the auth scheme once and retry. Only flip if
+                # no other thread already did (otherwise two threads cancel out).
+                with self._auth_lock:
+                    current = session.headers.get("Authorization", "")
+                    if current == used_auth:
+                        token = current.split(" ", 1)[-1]
+                        alt_scheme = "Token" if current.startswith("Bearer") else "Bearer"
+                        session.headers["Authorization"] = f"{alt_scheme} {token}"
                 continue
             logger.error("[FAIL] %s  HTTP %s: %s", filename, resp.status_code, resp.text[:200])
             return False
         return False
 
     def download_all(
-        self, rows: list[tuple[str, dict]], outdir: Path
+        self, rows: list[tuple[str, dict]], outdir: Path, n_workers: int = DEFAULT_WORKERS
     ) -> DownloadResult:
+        """Download every row, `n_workers` files at a time (1 = sequential)."""
         result = DownloadResult()
-        for _kind, r in rows:
-            sub = outdir
-            if self.download_file(r, sub):
+        total = len(rows)
+
+        def _name(r: dict) -> str:
+            return os.path.basename(r.get("archive_filename") or r.get("original_filename") or r["md5sum"])
+
+        def _one(r: dict) -> bool:
+            try:
+                return self.download_file(r, outdir)
+            except Exception as exc:  # network hiccup on one file shouldn't kill the batch
+                logger.error("[FAIL] %s  %s: %s", _name(r), type(exc).__name__, exc)
+                return False
+
+        def _record(r: dict, ok: bool) -> None:
+            if ok:
                 result.downloaded += 1
             else:
                 result.failed += 1
-                result.failed_filenames.append(
-                    os.path.basename(r.get("archive_filename") or r.get("original_filename") or r["md5sum"])
-                )
+                result.failed_filenames.append(_name(r))
+            logger.info("Progress: %d/%d done", result.downloaded + result.failed, total)
+
+        n_workers = max(1, min(n_workers, total or 1))
+        if n_workers == 1:
+            for _kind, r in rows:
+                _record(r, _one(r))
+            return result
+
+        with ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix="noirlab-dl") as pool:
+            futures = {pool.submit(_one, r): r for _kind, r in rows}
+            for fut in as_completed(futures):
+                _record(futures[fut], fut.result())
         return result
 
 
 # =====================================================================
 # High-level entry point -- what cli.py calls
 # =====================================================================
-def download_night(cfg: AcquisitionConfig, outdir: Path, dry_run: bool = False) -> DownloadResult:
+def download_night(
+    cfg: AcquisitionConfig, outdir: Path, dry_run: bool = False, n_workers: int | None = None
+) -> DownloadResult:
     """Download one proposal's science images + same-night calibrations.
 
     `cfg` is `PipelineConfig.acquisition` (see `config.py`). Raises
     `AcquisitionError` on login/search failures; per-file download
     failures are instead tallied in the returned `DownloadResult`.
+
+    Files are fetched `n_workers` at a time. If not given, falls back to
+    `cfg.workers` when the config defines it, else `DEFAULT_WORKERS` (4).
     """
     if not cfg.proposal or not cfg.night:
         raise AcquisitionError("acquisition.proposal and acquisition.night are required to download.")
@@ -347,8 +392,12 @@ def download_night(cfg: AcquisitionConfig, outdir: Path, dry_run: bool = False) 
         return result
 
     outdir.mkdir(parents=True, exist_ok=True)
-    logger.info("Downloading %d files to %s ...", len(all_rows), outdir.resolve())
-    download_result = client.download_all(all_rows, outdir)
+    workers = n_workers or getattr(cfg, "workers", None) or DEFAULT_WORKERS
+    logger.info(
+        "Downloading %d files to %s (%d parallel connections) ...",
+        len(all_rows), outdir.resolve(), min(workers, len(all_rows)),
+    )
+    download_result = client.download_all(all_rows, outdir, n_workers=workers)
     result.downloaded = download_result.downloaded
     result.failed = download_result.failed
     result.failed_filenames = download_result.failed_filenames
