@@ -28,7 +28,7 @@ class PipelineStage(ABC):
     def process(self, frame: Frame) -> Frame:
         """Process a single frame and return the resulting Frame.
 
-        Must not mutate `frame` in place -- use `frame.with_data(...)`
+        Must not mutate `frame` in place -- use `frame.with_extension_data(...)` / `frame.map_extensions(...)`
         so checkpointing and debugging stay simple. Must be picklable
         along with anything it captures, since it may run in a worker
         process.

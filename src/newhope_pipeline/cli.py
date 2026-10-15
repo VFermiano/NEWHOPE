@@ -16,6 +16,7 @@ from .config import AcquisitionConfig, PipelineConfig
 from .core.exceptions import AcquisitionError
 from .core.frame import FrameCollection
 from .core.pipeline import Pipeline
+from .io.decompress import uncompress_directory
 from .reduction.dark import DarkSubtraction
 from .reduction.flat import FlatFielding
 from .reduction.sky import SkySubtraction
@@ -108,6 +109,11 @@ def run(
     download_first: bool = typer.Option(
         False, "--download", help="Run the NOIRLab download step before processing"
     ),
+    delete_compressed: bool = typer.Option(
+        False,
+        "--delete-compressed",
+        help="Delete each .fits.fz after it has been uncompressed (default: keep it)",
+    ),
 ) -> None:
     """Run the reduction inside <base-dir>/<proposal>_<night>/.
 
@@ -132,13 +138,24 @@ def run(
             typer.echo(f"Download failed: {exc}", err=True)
             raise typer.Exit(code=1)
 
-    frames = FrameCollection.from_directory(paths.raw_dir)
+    # Step 1: uncompress .fits.fz (no-op if the files are already uncompressed).
+    decompressed = uncompress_directory(
+        paths.raw_dir, n_workers=config.n_workers, delete_original=delete_compressed
+    )
+    if decompressed.failed:
+        names = ", ".join(p.name for p, _ in decompressed.failed)
+        typer.echo(f"Could not uncompress: {names}", err=True)
+        raise typer.Exit(code=1)
+
+    # Step 2: load every exposure with all its detector extensions at once.
+    frames = FrameCollection.from_directory(paths.raw_dir, expected_extensions=config.n_extensions)
     if len(frames) == 0:
         raise typer.BadParameter(
             f"No FITS files in {paths.raw_dir}. Run `download` first or use --download."
         )
 
     reduction = config.reduction_for(paths)
+
     stages = [
         DarkSubtraction(reduction, n_workers=config.n_workers),
         FlatFielding(reduction, n_workers=config.n_workers),

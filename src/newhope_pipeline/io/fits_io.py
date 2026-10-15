@@ -17,6 +17,10 @@ def read_header(path: Path) -> fits.Header:
     with fits.open(path) as hdul:
         return hdul[0].header.copy()
 
+def read_extension_headers(path: Path) -> list[fits.Header]:
+    """Headers of every image extension, in file order"""
+    with fits.open(path) as hdul:
+        return [h.header.copy() for h in hdul[1:] if isinstance(h, (fits.ImageHDU, fits.CompImageHDU))]
 
 def normalize_header(header: fits.Header) -> fits.Header:
     """Normalize NEWFIRM header keywords to a single consistent schema.

@@ -10,6 +10,18 @@ PipelineState) is implemented and tested. `reduction/`, `astrometry/`, and
 `photometry/` are stub classes with `TODO` markers where the existing
 script-based logic needs to be ported in.
 
+
+## Multi-extension frames
+
+A NEWFIRM raw file is a MEF: empty primary HDU + 4 image extensions (one per
+detector). `Frame` holds the whole exposure -- `frame.header` is the primary
+header and `frame.extensions` is a list of `Extension(index, name, data, header)`,
+indexed 1..4 like the HDUs (`frame[3]` is detector 3). Stages never split the
+file: use `frame.map_extensions(lambda ext: ...)` for per-detector operations,
+`frame.with_extension_data([...])` / `with_extension_headers([...])` to build
+the output, and key master calibrations by `ext.index`. `n_extensions` in the
+config (default 4) makes a file with a wrong number of detectors fail at load.
+
 ## Setup
 
 ```bash

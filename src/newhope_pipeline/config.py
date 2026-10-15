@@ -84,6 +84,7 @@ class PipelineConfig(BaseModel):
     # Normally supplied on the command line (--base-dir); this is the default.
     base_dir: Path = Path("data")
     n_workers: int = 4
+    n_extensions: int = 4
     reduction: ReductionConfig
     astrometry: AstrometryConfig
     photometry: PhotometryConfig
