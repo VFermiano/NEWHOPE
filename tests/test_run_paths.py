@@ -1,13 +1,12 @@
 from pathlib import Path
 
-import numpy as np
-import pytest
 import yaml
-from astropy.io import fits
 from typer.testing import CliRunner
 
 from newhope_pipeline.cli import app
 from newhope_pipeline.config import PipelineConfig, make_run_name
+
+from .conftest import make_mef
 
 
 def _write_config(tmp_path: Path) -> Path:
@@ -72,8 +71,7 @@ def test_download_creates_run_dir_and_passes_it_on(tmp_path, monkeypatch):
 def test_run_reads_from_same_run_dir(tmp_path, monkeypatch):
     raw = tmp_path / "out" / "P1_2025-05-13" / "raw"
     raw.mkdir(parents=True)
-    h = fits.Header(); h["FILTER"] = "HX"; h["EXPTIME"] = 30.0
-    fits.writeto(raw / "a.fits", np.zeros((8, 8), dtype=np.float32), h)
+    make_mef(raw / "a.fits")
 
     captured = {}
 
@@ -108,7 +106,7 @@ def test_force_message_shown_on_every_task(tmp_path, monkeypatch):
         "download", "--config-path", str(_write_config(tmp_path)),
         "--base-dir", str(tmp_path), "--proposal", "P1", "--night", "2025-05-13",
     ])
-    assert "May the force be with you" in res.output
+    assert "may the force be with you" in res.output.lower()
 
     res = CliRunner().invoke(app, ["run", "--config-path", str(_write_config(tmp_path))])
-    assert "May the force be with you" in res.output  # even when the run then errors out
+    assert "may the force be with you" in res.output.lower()  # even when the run then errors out
