@@ -77,12 +77,44 @@ optional -- omit it and put your frames in `<base-dir>/<proposal>_<night>/raw/` 
 ## Run the pipeline
 
 ```bash
-# same --base-dir/--proposal/--night as the download -> same run folder
-newhope-pipeline run --base-dir /data/newfirm --proposal 2025A-599150 --night 2025-05-13
+newhope-pipeline run \
+    --proposal 2025A-599150 \
+    --night 2025-05-11 \
+    --base-dir /Volumes/monoceros/renew/data/ \
+    --verbose
 ```
 
-(Will fail until at least one reduction stage's `process()` is filled in --
-see `src/newhope_pipeline/reduction/dark.py`.)
+Each stage writes its result to `<run>/processed/<stage name>/` (dark_subtraction,
+flat_fielding, sky_subtraction) and records it in `pipeline_state.json`. Re-running
+the same command resumes: finished frames are reloaded from those files, so the next
+stage always gets the processed data. Delete a stage's folder (or the manifest) to
+force it to be redone. The command exits with code 1 if any frame failed in any stage.
+
+The run command writes a timestamped log to `<run>/pipeline.log` by default. Use
+`--log-file PATH` to choose another location. INFO output reports phase and frame
+progress; `--verbose` (or `-v`) adds DEBUG details such as individual FITS files and
+extensions.
+
+```bash
+newhope-pipeline run \
+    --proposal 2025A-599150 \
+    --night 2025-05-11 \
+    --base-dir /Volumes/monoceros/renew/data/ \
+    --verbose \
+    --log-file /tmp/newhope-debug.log
+```
+
+## Sky subtraction
+
+`reduction/sky.py`. Per detector: for every frame, the `n_neighbors` exposures of the
+same filter + `group_keys` (default `OBJECT`) closest in time (within `max_time_gap_s`,
+read from `MJD-OBS`/`DATE-OBS`) are normalized by their own sky level, objects and bad
+pixels (non-finite or 0) are masked, and the pixel-wise median is scaled to the frame
+and subtracted. A first unmasked median captures the sky gradient, objects are detected
+on the residual, and the sky is rebuilt `iterations` times. Bad pixels keep their value.
+Output headers get `SKYSUB`, `SKYMODE`, `SKYNFRM`, `SKYITER`, `SKYLEVEL`. All options
+live under `reduction.sky` in the config (`SkyConfig`). A frame with fewer than
+`min_neighbors` usable exposures fails (it is not subtracted with a bad sky).
 
 ## Migration order
 

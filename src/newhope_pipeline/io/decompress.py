@@ -94,6 +94,8 @@ def uncompress_directory(
         return result
 
     logger.info("Uncompressing %d file(s) in %s", len(files), directory)
+    for index, path in enumerate(files, start=1):
+        logger.debug("Decompression task %d/%d: %s", index, len(files), path.name)
     outcomes = run_parallel(
         _uncompress_one,
         [(p, overwrite, delete_original) for p in files],

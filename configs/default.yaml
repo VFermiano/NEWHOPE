@@ -9,6 +9,13 @@ reduction:
   # dark_dir: data/calib/darks
   # flat_dir: data/calib/flats
   filters: [JX, HX, KXs]
+  sky:
+    mode: scale            # scale = multiplicative, offset = additive
+    n_neighbors: 10        # nearest-in-time exposures per sky
+    min_neighbors: 4       # fewer than this -> the frame fails
+    max_time_gap_s: 1800
+    group_keys: [OBJECT]   # header keywords that must match (besides the filter)
+    iterations: 2          # object-masked passes after the initial unmasked median
 
 astrometry:
   scamp_config_path: configs/scamp/default.scamp

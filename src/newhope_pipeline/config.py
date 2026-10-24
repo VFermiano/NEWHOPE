@@ -11,9 +11,38 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 Filter = Literal["JX", "HX", "KXs"]
+
+
+class SkyConfig(BaseModel):
+    """Parameters of the sky-subtraction stage (see reduction/sky.py)."""
+
+    # "scale": sky_i = median(frame_j / level_j) * level_i  (multiplicative; default)
+    # "offset": sky_i = median(frame_j - level_j) + level_i  (additive)
+    mode: Literal["scale", "offset"] = "scale"
+    n_neighbors: int = Field(10, ge=3)  # nearest-in-time exposures used per sky
+    min_neighbors: int = Field(4, ge=2)  # fewer than this -> the frame fails
+    max_time_gap_s: float = Field(1800.0, gt=0)  # ignore exposures further away in time
+    # Header keywords (besides the filter) that must match for two exposures to
+    # share a sky, i.e. to belong to the same dither sequence.
+    group_keys: list[str] = Field(default_factory=lambda: ["OBJECT"])
+    iterations: int = Field(2, ge=1)  # object-masked passes after the initial unmasked median
+    detect_nsigma: float = Field(3.0, gt=0)  # object-mask threshold on the smoothed image
+    # Smallest object peak (as a fraction of the sky level) worth masking; fainter residuals are
+    # below flat-field accuracy anyway and masking them only removes good sky pixels.
+    detect_floor_frac: float = Field(0.002, ge=0)
+    detect_smooth_pix: float = Field(2.0, gt=0)  # gaussian sigma (pixels) before thresholding
+    mask_grow_pix: int = Field(3, ge=0)  # dilation of the object mask
+    background_box: int = Field(64, ge=8)  # block size of the coarse background
+    min_valid: int = Field(3, ge=1)  # min unmasked samples per pixel; else interpolated
+
+    @model_validator(mode="after")
+    def _check_neighbors(self) -> "SkyConfig":
+        if self.min_neighbors > self.n_neighbors:
+            raise ValueError("min_neighbors cannot exceed n_neighbors")
+        return self
 
 
 class ReductionConfig(BaseModel):
@@ -22,6 +51,7 @@ class ReductionConfig(BaseModel):
     dark_dir: Path | None = None
     flat_dir: Path | None = None
     filters: list[Filter] = Field(default_factory=lambda: ["JX", "HX", "KXs"])
+    sky: SkyConfig = Field(default_factory=SkyConfig)
 
 
 class AstrometryConfig(BaseModel):

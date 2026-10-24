@@ -14,6 +14,7 @@ what a dark subtraction or a PSF fit does.
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
@@ -27,6 +28,7 @@ from .exceptions import PipelineError
 # convert to float32 the data is already scaled, so carrying these along
 # would make astropy re-apply them (or warn) when writing.
 _SCALING_KEYS = ("BSCALE", "BZERO", "BLANK")
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -152,6 +154,7 @@ class Frame:
         """
         path = Path(path)
         extensions: list[Extension] = []
+        logger.debug("Opening FITS file %s", path)
         with fits.open(path) as hdul:
             primary_header = hdul[0].header.copy()
             if hdul[0].data is not None:
@@ -162,7 +165,10 @@ class Frame:
             for i, hdu in enumerate(hdul):
                 if i == 0 or not isinstance(hdu, (fits.ImageHDU, fits.CompImageHDU)):
                     continue
-                if hdu.data is None or hdu.data.ndim != 2:
+                logger.debug("Reading image extension %d from %s", i, path.name)
+                data = hdu.data
+                if data is None or data.ndim != 2:
+                    logger.debug("Skipping non-image or non-2-D extension %d in %s", i, path.name)
                     continue
                 header = hdu.header.copy()
                 for key in _SCALING_KEYS:
@@ -171,10 +177,11 @@ class Frame:
                     Extension(
                         index=i,
                         name=str(header.get("EXTNAME", f"EXT{i}")),
-                        data=hdu.data.astype(np.float32),
+                        data=data.astype(np.float32),
                         header=header,
                     )
                 )
+                logger.debug("Loaded extension %d from %s with shape %s", i, path.name, data.shape)
 
         if not extensions:
             raise PipelineError(f"{path.name}: no 2-D image extensions found")
@@ -188,6 +195,7 @@ class Frame:
         first = extensions[0].header
         filt = primary_header.get("FILTER", first.get("FILTER", "UNKNOWN"))
         exptime = float(primary_header.get("EXPTIME", first.get("EXPTIME", 0.0)))
+        logger.debug("Loaded %s: %d image extension(s)", path.name, len(extensions))
         return cls(path=path, extensions=extensions, header=primary_header, filt=filt, exptime=exptime)
 
     def write(self, out_path: Path) -> None:
@@ -233,8 +241,26 @@ class FrameCollection:
         pattern: str = "*.fits",
         expected_extensions: Optional[int] = None,
     ) -> "FrameCollection":
-        frames = [
-            Frame.from_fits(p, expected_extensions=expected_extensions)
-            for p in sorted(Path(directory).glob(pattern))
-        ]
+        directory = Path(directory)
+        logger.info("Starting FITS discovery and loading in %s (pattern=%s)", directory, pattern)
+        files = sorted(directory.glob(pattern))
+        total = len(files)
+        logger.info("Discovered %d FITS file(s) in %s", total, directory)
+        frames = []
+        progress_interval = max(1, (total + 99) // 100)
+        for index, path in enumerate(files, start=1):
+            logger.debug("Loading FITS file %d/%d: %s", index, total, path.name)
+            try:
+                frame = Frame.from_fits(path, expected_extensions=expected_extensions)
+            except Exception:
+                logger.exception("Failed to load FITS file %s from %s", path.name, directory)
+                raise
+            frames.append(frame)
+            if index % progress_interval == 0 or index == total:
+                percent = 100.0 * index / total if total else 100.0
+                logger.info("FITS loading progress: %d/%d file(s) (%.1f%%)", index, total, percent)
+
+        if total == 0:
+            logger.info("FITS loading progress: 0/0 file(s) (0.0%)")
+        logger.info("Completed FITS loading: %d/%d file(s) from %s", len(frames), total, directory)
         return cls(frames)
