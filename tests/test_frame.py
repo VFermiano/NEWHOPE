@@ -3,7 +3,7 @@ import pytest
 from astropy.io import fits
 
 from newhope_pipeline.core.exceptions import PipelineError
-from newhope_pipeline.core.frame import Frame, FrameCollection
+from newhope_pipeline.core.frame import Frame, FrameCollection, FrameReference
 
 from .conftest import SHAPE, make_mef
 
@@ -110,6 +110,9 @@ def test_compressed_extensions_are_supported(tmp_path):
     frame = Frame.from_fits(path, expected_extensions=4)
     assert frame.filt == "JX"
     assert np.allclose(frame[3].data, 21.0)
+    reference = FrameReference.from_fits(path, expected_extensions=4)
+    assert reference.shapes == {k: SHAPE for k in range(1, 5)}
+    assert np.all(reference.load(extension_indices=[3])[3].data == 21.0)
 
 
 def test_frame_collection_by_filter(synthetic_frame_file):
@@ -126,3 +129,30 @@ def test_from_directory_passes_expected_extensions(tmp_path):
     with pytest.raises(PipelineError):
         FrameCollection.from_directory(tmp_path, expected_extensions=4)
     assert len(FrameCollection.from_directory(tmp_path)) == 2
+
+
+def test_directory_discovery_returns_header_only_references(tmp_path, monkeypatch):
+    path = make_mef(tmp_path / "a.fits")
+
+    def eager_load_was_called(*args, **kwargs):
+        raise AssertionError("discovery must not load frame arrays")
+
+    monkeypatch.setattr(Frame, "from_fits", eager_load_was_called)
+    frames = FrameCollection.from_directory(tmp_path, expected_extensions=4)
+
+    assert len(frames) == 1
+    reference = next(iter(frames))
+    assert isinstance(reference, FrameReference)
+    assert reference.path == path
+    assert reference.filt == "HX" and reference.exptime == 30.0
+    assert reference.shapes == {1: SHAPE, 2: SHAPE, 3: SHAPE, 4: SHAPE}
+    assert not any(hasattr(extension, "data") for extension in reference.extensions)
+
+
+def test_reference_loads_only_requested_detector(synthetic_frame_file):
+    reference = FrameReference.from_fits(synthetic_frame_file, expected_extensions=4)
+    frame = reference.load(extension_indices=[3])
+
+    assert frame.n_ext == 1
+    assert [extension.index for extension in frame] == [3]
+    assert np.all(frame[3].data == 300.0)

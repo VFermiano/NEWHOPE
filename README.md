@@ -14,10 +14,12 @@ script-based logic needs to be ported in.
 ## Multi-extension frames
 
 A NEWFIRM raw file is a MEF: empty primary HDU + 4 image extensions (one per
-detector). `Frame` holds the whole exposure -- `frame.header` is the primary
-header and `frame.extensions` is a list of `Extension(index, name, data, header)`,
-indexed 1..4 like the HDUs (`frame[3]` is detector 3). Stages never split the
-file: use `frame.map_extensions(lambda ext: ...)` for per-detector operations,
+detector). `FrameReference` stores the path, headers, detector shapes, and exposure
+metadata without reading pixels. `FrameReference.load()` loads an exposure on demand. A loaded
+`Frame` holds the whole exposure -- `frame.header` is the primary header and
+`frame.extensions` is a list of `Extension(index, name, data, header)`, indexed 1..4
+like the HDUs (`frame[3]` is detector 3). Stages never split the file: use
+`frame.map_extensions(lambda ext: ...)` for per-detector operations,
 `frame.with_extension_data([...])` / `with_extension_headers([...])` to build
 the output, and key master calibrations by `ext.index`. `n_extensions` in the
 config (default 4) makes a file with a wrong number of detectors fail at load.
@@ -81,19 +83,74 @@ newhope-pipeline run \
     --proposal 2025A-599150 \
     --night 2025-05-11 \
     --base-dir /Volumes/monoceros/renew/data/ \
+    --batch-size 4 \
+    --workers 1 \
     --verbose
 ```
 
 Each stage writes its result to `<run>/processed/<stage name>/` (dark_subtraction,
 flat_fielding, sky_subtraction) and records it in `pipeline_state.json`. Re-running
-the same command resumes: finished frames are reloaded from those files, so the next
-stage always gets the processed data. Delete a stage's folder (or the manifest) to
-force it to be redone. The command exits with code 1 if any frame failed in any stage.
+the same command resumes from structurally valid products without loading completed
+raw images. Delete a stage's folder (or the manifest) to force it to be redone. The
+command exits with code 1 if any frame failed in any stage.
+
+`FrameCollection.from_directory()` discovers header-only `FrameReference` objects;
+pixel arrays are loaded only when a stage needs them. Independent stages load a frame
+inside the worker, atomically write the MEF output, and return a metadata reference to
+the next stage. `--batch-size` limits submitted frame tasks (default `1`); `--workers`
+overrides the configured worker count. The configuration keys are `batch_size` and
+`n_workers`. At most `min(batch_size, workers)` independent-frame tasks run at once.
+Each active task can hold its input and output arrays together, so ordinary stages
+use at most about `2 * min(batch_size, workers)` full science-frame equivalents, plus
+the required calibration masters and FITS/library buffers. With the default batch
+size of one, independent stages process one frame at a time even if more workers are
+configured.
+
+Sky subtraction keeps its existing filter/object grouping, nearest-time neighbor
+selection, masks, scaling, and iterative median. Each active target loads its required
+neighbor-graph halo and reads neighbor detector extensions one detector at a time.
+If `H` is the number of distinct references in a target's dependency halo, that task
+holds one target MEF, up to `H - 1` single-detector neighbor arrays, and one output MEF
+plus masks and the bounded median workspace. `H` is the closure through
+`iterations + 1` neighbor-graph hops and can approach the group size for some settings.
+Sky targets use at most `min(batch_size, workers)` concurrent tasks; completed target
+products are written before replacement work is submitted. Raising either limit
+increases peak RAM.
+Dark and flat correction use the existing prebuilt master products; dark and flat
+calibration caches are each capped to one matching key/filter per stage instance, so
+calibration arrays do not grow with exposure count. FITS data are read with memory
+mapping disabled and copied to float32 arrays, which also works for compressed
+extensions and avoids retaining arrays tied to open FITS handles.
+
+To start with one worker and a conservative working set:
+
+```bash
+newhope-pipeline run \
+    --proposal 2025A-599150 \
+    --night 2025-05-11 \
+    --base-dir /Volumes/monoceros/renew/data/ \
+    --batch-size 1 \
+    --workers 1
+```
 
 The run command writes a timestamped log to `<run>/pipeline.log` by default. Use
 `--log-file PATH` to choose another location. INFO output reports phase and frame
 progress; `--verbose` (or `-v`) adds DEBUG details such as individual FITS files and
 extensions.
+
+### Memory benchmark
+
+The following reproducible benchmark creates synthetic four-detector FITS images and
+measures peak process RSS in fresh processes:
+
+```bash
+python benchmarks/memory_scaling.py --frames 16 --size 1024
+```
+
+On the implementation environment, this measured **322.1 MiB** for eager loading all
+16 frames and **147.3 MiB** for the reference-based pipeline, a **54.3% lower peak**.
+This synthetic run validates the scaling direction; it does not set a RAM guarantee
+for the full observing dataset or the sky-neighbor halo.
 
 ```bash
 newhope-pipeline run \

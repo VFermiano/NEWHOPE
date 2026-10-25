@@ -5,6 +5,10 @@ caller can retry on ScampTimeoutError but abort immediately on a
 ReductionError from a missing master dark.
 """
 
+from __future__ import annotations
+
+import traceback
+
 
 class PipelineError(Exception):
     """Base class for all pipeline errors."""
@@ -28,3 +32,16 @@ class PhotometryError(PipelineError):
 
 class AcquisitionError(PipelineError):
     """Raised when downloading raw data (e.g. from the NOIRLab archive) fails."""
+
+
+def detach_traceback(exc: Exception) -> Exception:
+    """Keep a printable traceback while releasing arrays held by stack locals."""
+    details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    try:
+        setattr(exc, "_newhope_traceback", details)
+    except Exception:
+        pass
+    exc.__traceback__ = None
+    exc.__cause__ = None
+    exc.__context__ = None
+    return exc

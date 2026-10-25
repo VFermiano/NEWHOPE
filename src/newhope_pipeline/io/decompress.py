@@ -85,6 +85,7 @@ def uncompress_directory(
     n_workers: int = 1,
     overwrite: bool = False,
     delete_original: bool = False,
+    batch_size: int = 1,
 ) -> DecompressResult:
     """Uncompress every `*.fits.fz` in `directory`. No-op if there are none."""
     files = find_compressed(directory)
@@ -93,13 +94,23 @@ def uncompress_directory(
         logger.info("No .fits.fz files in %s; nothing to uncompress.", directory)
         return result
 
-    logger.info("Uncompressing %d file(s) in %s", len(files), directory)
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    logger.info(
+        "Uncompressing %d file(s) in %s with batch_size=%d, workers=%d",
+        len(files),
+        directory,
+        batch_size,
+        n_workers,
+    )
     for index, path in enumerate(files, start=1):
         logger.debug("Decompression task %d/%d: %s", index, len(files), path.name)
     outcomes = run_parallel(
         _uncompress_one,
         [(p, overwrite, delete_original) for p in files],
         n_workers=n_workers,
+        max_in_flight=batch_size,
+        task_labels=[path.name for path in files],
     )
     for path, outcome in zip(files, outcomes):
         if isinstance(outcome, Exception):

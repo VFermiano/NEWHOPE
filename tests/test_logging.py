@@ -96,7 +96,7 @@ def test_frame_collection_reports_actual_loading_progress(tmp_path, caplog):
     assert any("1/3 file(s) (33.3%)" in message for message in messages)
     assert any("2/3 file(s) (66.7%)" in message for message in messages)
     assert any("3/3 file(s) (100.0%)" in message for message in messages)
-    assert any("Completed FITS loading: 3/3" in message for message in messages)
+    assert any("Completed FITS metadata discovery: 3/3" in message for message in messages)
 
 
 def test_frame_collection_empty_directory_completes_without_division(tmp_path, caplog):
@@ -104,14 +104,14 @@ def test_frame_collection_empty_directory_completes_without_division(tmp_path, c
         frames = FrameCollection.from_directory(tmp_path)
     assert len(frames) == 0
     assert any("0/0 file(s) (0.0%)" in record.getMessage() for record in caplog.records)
-    assert any("Completed FITS loading: 0/0" in record.getMessage() for record in caplog.records)
+    assert any("Completed FITS metadata discovery: 0/0" in record.getMessage() for record in caplog.records)
 
 
 def test_frame_collection_logs_invalid_fits_and_extension_validation(tmp_path, caplog):
     make_mef(tmp_path / "wrong-count.fits", n_ext=2)
     with caplog.at_level(logging.INFO), pytest.raises(PipelineError, match="expected 4"):
         FrameCollection.from_directory(tmp_path, expected_extensions=4)
-    failures = [record for record in caplog.records if "Failed to load FITS file" in record.getMessage()]
+    failures = [record for record in caplog.records if "Failed to inspect FITS file" in record.getMessage()]
     assert failures and failures[-1].exc_info is not None
     assert not any("1/1 file(s)" in record.getMessage() for record in caplog.records)
 
@@ -121,7 +121,7 @@ def test_frame_collection_logs_invalid_fits_and_extension_validation(tmp_path, c
     (invalid_dir / "broken.fits").write_text("not a FITS file")
     with caplog.at_level(logging.INFO), pytest.raises(OSError):
         FrameCollection.from_directory(invalid_dir)
-    assert any("Failed to load FITS file broken.fits" in record.getMessage() for record in caplog.records)
+    assert any("Failed to inspect FITS file broken.fits" in record.getMessage() for record in caplog.records)
 
 
 class _IdentityStage(PipelineStage):

@@ -113,7 +113,8 @@ class PipelineConfig(BaseModel):
     # Parent directory under which each run gets its own subdirectory.
     # Normally supplied on the command line (--base-dir); this is the default.
     base_dir: Path = Path("data")
-    n_workers: int = 4
+    n_workers: int = Field(4, ge=1)
+    batch_size: int = Field(1, ge=1)
     n_extensions: int = 4
     reduction: ReductionConfig
     astrometry: AstrometryConfig

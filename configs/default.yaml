@@ -3,6 +3,7 @@
 #   <base_dir>/<proposal>_<night>/{raw/, processed/, pipeline_state.json}
 base_dir: data
 n_workers: 4
+batch_size: 1  # maximum raw frames scheduled at once; increase only if memory allows
 
 reduction:
   # dark_dir / flat_dir default to the run's raw/ directory; uncomment to override.

@@ -83,6 +83,30 @@ def test_sky_removed_stars_kept_per_chip(tmp_path):
             assert peak == pytest.approx(STAR_AMP, rel=0.05)  # star not eaten by the sky model
 
 
+def test_reference_sky_matches_loaded_group_results(tmp_path):
+    paths, _ = make_sequence(tmp_path, n=10)
+    config = Cfg(n_neighbors=6, min_neighbors=4)
+
+    eager = SkySubtraction(config).run(load(paths), PipelineState(tmp_path / "eager.json"))
+    lazy_stage = SkySubtraction(config, n_workers=2, batch_size=2)
+    lazy_stage.output_dir = tmp_path / "sky-products"
+    lazy = lazy_stage.run(
+        FrameCollection.from_directory(tmp_path, pattern="s_*.fits", expected_extensions=4),
+        PipelineState(tmp_path / "lazy.json"),
+    )
+
+    assert len(eager) == len(lazy) == len(paths)
+    for eager_frame, lazy_frame in zip(eager, lazy):
+        lazy_frame = lazy_frame.load()
+        assert eager_frame.frame_id == lazy_frame.frame_id
+        assert eager_frame.path.name == lazy_frame.path.name
+        assert eager_frame.header == lazy_frame.header
+        assert [ext.name for ext in eager_frame] == [ext.name for ext in lazy_frame]
+        for index in range(1, 5):
+            assert eager_frame[index].header == lazy_frame[index].header
+            np.testing.assert_allclose(eager_frame[index].data, lazy_frame[index].data, rtol=0, atol=0)
+
+
 def ndilate(mask):
     from scipy import ndimage
 
