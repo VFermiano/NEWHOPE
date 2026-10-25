@@ -190,17 +190,26 @@ def run(
         "--log-file",
         help="Log file path (default: <run directory>/pipeline.log)",
     ),
+    batch_size: int | None = typer.Option(
+        None, "--batch-size", min=1, help="Maximum number of frame tasks in flight (default: config batch_size)"
+    ),
+    workers: int | None = typer.Option(
+        None, "--workers", min=1, help="Worker processes / sky threads (default: config n_workers)"
+    ),
 ) -> None:
     """Run the reduction inside <base-dir>/<proposal>_<night>/.
 
     Reads from `raw/`, writes to `processed/`, and keeps the resume manifest
     in the same run directory. INFO logs report phase and frame progress;
     pass `--verbose`/`-v` for DEBUG details. Logs go to `<run>/pipeline.log`
-    unless `--log-file PATH` is supplied.
+    unless `--log-file PATH` is supplied. `--batch-size` bounds submitted
+    frame tasks; its conservative default is 1.
     """
     _force_message()
 
     config = PipelineConfig.from_yaml(config_path)
+    worker_count = workers if workers is not None else config.n_workers
+    selected_batch_size = batch_size if batch_size is not None else config.batch_size
     proposal, night = _resolve_target(config, proposal, night, config_path)
     paths = config.resolve_paths(proposal, night, base_dir=base_dir, create=True)
     selected_log_file = log_file or paths.run_dir / "pipeline.log"
@@ -208,12 +217,14 @@ def run(
     try:
         typer.echo(f"Run directory: {paths.run_dir}")
         logger.info(
-            "Starting run: proposal=%s, night=%s, run_dir=%s, input_dir=%s, output_dir=%s",
+            "Starting run: proposal=%s, night=%s, run_dir=%s, input_dir=%s, output_dir=%s, batch_size=%d, workers=%d",
             proposal,
             night,
             paths.run_dir,
             paths.raw_dir,
             paths.output_dir,
+            selected_batch_size,
+            worker_count,
         )
         logger.info("Persistent log file: %s", selected_log_file)
 
@@ -236,10 +247,16 @@ def run(
             )
 
         logger.info(
-            "Starting FITS decompression in %s with %d worker(s)", paths.raw_dir, config.n_workers
+            "Starting FITS decompression in %s with batch_size=%d, workers=%d",
+            paths.raw_dir,
+            selected_batch_size,
+            worker_count,
         )
         decompressed = uncompress_directory(
-            paths.raw_dir, n_workers=config.n_workers, delete_original=delete_compressed
+            paths.raw_dir,
+            n_workers=worker_count,
+            batch_size=selected_batch_size,
+            delete_original=delete_compressed,
         )
         logger.info(
             "FITS decompression complete: found=%d, decompressed=%d, skipped=%d, failed=%d",
@@ -255,33 +272,62 @@ def run(
             raise typer.Exit(code=1)
 
         frames = FrameCollection.from_directory(paths.raw_dir, expected_extensions=config.n_extensions)
-        logger.info("FITS loading complete: %d frame(s) loaded from %s", len(frames), paths.raw_dir)
+        logger.info("FITS discovery complete: %d frame reference(s) from %s", len(frames), paths.raw_dir)
         if len(frames) == 0:
             logger.error("No FITS frames found in %s", paths.raw_dir)
             raise typer.BadParameter(
                 f"No FITS files in {paths.raw_dir}. Run `download` first or use --download."
             )
 
+        dark_frames = frames.by_obstype("dark")
+        flat_frames = frames.by_obstype("dflat")
+        science_frames = frames.by_predicate(
+            lambda frame: frame.obstype not in {"dark", "dflat"}
+        )
+        logger.info(
+            "Classified FITS frames by OBSTYPE: science=%d, dark=%d, dflat=%d",
+            len(science_frames),
+            len(dark_frames),
+            len(flat_frames),
+        )
+        if len(science_frames) == 0:
+            raise typer.BadParameter(f"No science FITS frames found in {paths.raw_dir}.")
+
         reduction = config.reduction_for(paths)
         stages = [
-            DarkSubtraction(reduction, n_workers=config.n_workers),
-            FlatFielding(reduction, n_workers=config.n_workers),
-            SkySubtraction(reduction, n_workers=config.n_workers),
+            DarkSubtraction(
+                reduction,
+                n_workers=worker_count,
+                batch_size=selected_batch_size,
+                calibration_frames=dark_frames,
+            ),
+            FlatFielding(
+                reduction,
+                n_workers=worker_count,
+                batch_size=selected_batch_size,
+                calibration_frames=flat_frames,
+            ),
+            SkySubtraction(reduction, n_workers=worker_count, batch_size=selected_batch_size),
             # TODO: append AstrometricCalibration(config.astrometry, ...),
             # PSFPhotometryStage(config.photometry, ...),
             # VVVCalibrationStage(config.photometry, ...) once ported.
         ]
         for stage in stages:
             stage.output_dir = paths.output_dir / stage.name
-        logger.info("Intermediate and final stage outputs are stored under %s", paths.output_dir)
+        logger.info(
+            "Stage outputs are stored under %s; frame batch size=%d, worker count=%d",
+            paths.output_dir,
+            selected_batch_size,
+            worker_count,
+        )
 
         pipeline = Pipeline(stages, manifest_path=paths.manifest_path)
-        result = pipeline.run(frames)
-        n_failed = len(frames) - len(result)
+        result = pipeline.run(science_frames)
+        n_failed = len(science_frames) - len(result)
         logger.info(
             "Run summary: successful=%d/%d, failed=%d, manifest=%s, outputs=%s",
             len(result),
-            len(frames),
+            len(science_frames),
             n_failed,
             paths.manifest_path,
             paths.output_dir,

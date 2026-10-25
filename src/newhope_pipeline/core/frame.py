@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
@@ -29,6 +31,16 @@ from .exceptions import PipelineError
 # would make astropy re-apply them (or warn) when writing.
 _SCALING_KEYS = ("BSCALE", "BZERO", "BLANK")
 logger = logging.getLogger(__name__)
+
+
+def _obstype(header: fits.Header, extensions: Sequence[object]) -> str:
+    value = header.get("OBSTYPE")
+    if value is None:
+        for extension in extensions:
+            value = extension.header.get("OBSTYPE")
+            if value is not None:
+                break
+    return "" if value is None else str(value).strip().lower()
 
 
 @dataclass
@@ -55,6 +67,132 @@ class Extension:
 
     def with_header(self, new_header: fits.Header) -> "Extension":
         return Extension(self.index, self.name, self.data, new_header)
+
+
+@dataclass
+class ExtensionReference:
+    """Header-only description of one detector image in a FITS exposure."""
+
+    index: int
+    name: str
+    shape: tuple[int, int]
+    header: fits.Header
+
+
+@dataclass
+class FrameReference:
+    """Lightweight exposure identity and metadata, without image pixel arrays."""
+
+    path: Path
+    extensions: list[ExtensionReference]
+    header: fits.Header
+    filt: str
+    exptime: float
+    frame_id: str = ""
+    status: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.path = Path(self.path)
+        if not self.extensions:
+            raise PipelineError(f"Frame {self.path} has no image extensions")
+        if not self.frame_id:
+            self.frame_id = self._compute_id()
+
+    def _compute_id(self) -> str:
+        return hashlib.sha1(str(self.path).encode()).hexdigest()[:12]
+
+    @classmethod
+    def from_fits(cls, path: Path, expected_extensions: Optional[int] = None) -> "FrameReference":
+        """Read FITS headers and detector shapes without touching image data."""
+        path = Path(path)
+        logger.debug("Reading FITS metadata from %s", path)
+        extensions: list[ExtensionReference] = []
+        with fits.open(path, memmap=False, lazy_load_hdus=False) as hdul:
+            primary_header = hdul[0].header.copy()
+            file_size = path.stat().st_size
+            if int(primary_header.get("NAXIS", 0)) > 0:
+                raise PipelineError(
+                    f"{path.name}: image data found in the primary HDU; expected a "
+                    "multi-extension file with an empty primary"
+                )
+            for index, hdu in enumerate(hdul):
+                if index == 0 or not isinstance(hdu, (fits.ImageHDU, fits.CompImageHDU)):
+                    continue
+                header = hdu.header.copy()
+                if int(header.get("NAXIS", 0)) != 2:
+                    continue
+                shape = (int(header["NAXIS2"]), int(header["NAXIS1"]))
+                info = hdu.fileinfo()
+                if info is not None and info.get("datLoc") is not None and info.get("datSpan") is not None:
+                    required_size = int(info["datLoc"]) + int(info["datSpan"])
+                    if required_size > file_size:
+                        raise PipelineError(
+                            f"{path.name}: image extension {index} is truncated "
+                            f"(needs {required_size} bytes, file has {file_size})"
+                        )
+                for key in _SCALING_KEYS:
+                    header.remove(key, ignore_missing=True)
+                extensions.append(
+                    ExtensionReference(
+                        index=index,
+                        name=str(header.get("EXTNAME", f"EXT{index}")),
+                        shape=shape,
+                        header=header,
+                    )
+                )
+
+        if not extensions:
+            raise PipelineError(f"{path.name}: no 2-D image extensions found")
+        if expected_extensions is not None and len(extensions) != expected_extensions:
+            raise PipelineError(
+                f"{path.name}: expected {expected_extensions} image extensions, found {len(extensions)}"
+            )
+
+        first = extensions[0].header
+        filt = primary_header.get("FILTER", first.get("FILTER", "UNKNOWN"))
+        exptime = float(primary_header.get("EXPTIME", first.get("EXPTIME", 0.0)))
+        return cls(path=path, extensions=extensions, header=primary_header, filt=filt, exptime=exptime)
+
+    @property
+    def n_ext(self) -> int:
+        return len(self.extensions)
+
+    @property
+    def obstype(self) -> str:
+        """Normalized observation type from the primary or detector header."""
+        return _obstype(self.header, self.extensions)
+
+    @property
+    def shapes(self) -> dict[int, tuple[int, int]]:
+        return {ext.index: ext.shape for ext in self.extensions}
+
+    def __iter__(self) -> Iterator[ExtensionReference]:
+        return iter(self.extensions)
+
+    def __getitem__(self, index: int) -> ExtensionReference:
+        for ext in self.extensions:
+            if ext.index == index:
+                return ext
+        raise KeyError(f"{self.path.name} has no extension with index {index}")
+
+    def load(self, extension_indices: Optional[Sequence[int]] = None) -> "Frame":
+        """Load selected detector arrays on demand; no arrays are cached here."""
+        frame = Frame.from_fits(
+            self.path,
+            expected_extensions=self.n_ext,
+            extension_indices=extension_indices,
+            _reference=self,
+        )
+        frame.frame_id = self.frame_id
+        frame.status = dict(self.status)
+        return frame
+
+    def at_path(self, path: Path) -> "FrameReference":
+        """Create a metadata reference at a new path while keeping exposure identity."""
+        reference = FrameReference.from_fits(path, expected_extensions=self.n_ext)
+        reference.frame_id = self.frame_id
+        reference.status = dict(self.status)
+        return reference
 
 
 @dataclass
@@ -89,6 +227,11 @@ class Frame:
     @property
     def n_ext(self) -> int:
         return len(self.extensions)
+
+    @property
+    def obstype(self) -> str:
+        """Normalized observation type from the primary or detector header."""
+        return _obstype(self.header, self.extensions)
 
     def __iter__(self) -> Iterator[Extension]:
         return iter(self.extensions)
@@ -145,50 +288,60 @@ class Frame:
 
     # --------------------------------------------------------------------- I/O
     @classmethod
-    def from_fits(cls, path: Path, expected_extensions: Optional[int] = None) -> "Frame":
-        """Open a MEF file and load *all* 2-D image extensions at once.
+    def from_fits(
+        cls,
+        path: Path,
+        expected_extensions: Optional[int] = None,
+        extension_indices: Optional[Sequence[int]] = None,
+        _reference: Optional[FrameReference] = None,
+    ) -> "Frame":
+        """Open a MEF file and load requested 2-D detector extensions.
 
         `expected_extensions` (e.g. 4 for NEWFIRM) turns a truncated or
         odd file into an immediate, clear error instead of a silently
-        wrong reduction three stages later.
+        wrong reduction three stages later. `extension_indices` lets a
+        detector-local operation avoid reading the other image arrays.
         """
         path = Path(path)
         extensions: list[Extension] = []
         logger.debug("Opening FITS file %s", path)
-        with fits.open(path) as hdul:
+        reference = _reference or FrameReference.from_fits(path, expected_extensions=expected_extensions)
+        selected_indices = (
+            {ext.index for ext in reference.extensions}
+            if extension_indices is None
+            else set(extension_indices)
+        )
+        unknown_indices = selected_indices - set(reference.shapes)
+        if unknown_indices:
+            raise PipelineError(
+                f"{path.name}: requested missing image extension(s) {sorted(unknown_indices)}"
+            )
+        with fits.open(path, memmap=False, lazy_load_hdus=False) as hdul:
             primary_header = hdul[0].header.copy()
-            if hdul[0].data is not None:
-                raise PipelineError(
-                    f"{path.name}: image data found in the primary HDU; expected a "
-                    "multi-extension file with an empty primary"
-                )
-            for i, hdu in enumerate(hdul):
-                if i == 0 or not isinstance(hdu, (fits.ImageHDU, fits.CompImageHDU)):
+            for descriptor in reference.extensions:
+                if descriptor.index not in selected_indices:
                     continue
+                hdu = hdul[descriptor.index]
+                i = descriptor.index
                 logger.debug("Reading image extension %d from %s", i, path.name)
                 data = hdu.data
                 if data is None or data.ndim != 2:
                     logger.debug("Skipping non-image or non-2-D extension %d in %s", i, path.name)
                     continue
-                header = hdu.header.copy()
-                for key in _SCALING_KEYS:
-                    header.remove(key, ignore_missing=True)
                 extensions.append(
                     Extension(
                         index=i,
-                        name=str(header.get("EXTNAME", f"EXT{i}")),
-                        data=data.astype(np.float32),
-                        header=header,
+                        name=descriptor.name,
+                        data=np.array(data, dtype=np.float32, copy=True),
+                        header=descriptor.header.copy(),
                     )
                 )
                 logger.debug("Loaded extension %d from %s with shape %s", i, path.name, data.shape)
 
         if not extensions:
-            raise PipelineError(f"{path.name}: no 2-D image extensions found")
-        if expected_extensions is not None and len(extensions) != expected_extensions:
-            raise PipelineError(
-                f"{path.name}: expected {expected_extensions} image extensions, found {len(extensions)}"
-            )
+            raise PipelineError(f"{path.name}: no requested 2-D image extensions found")
+        if extension_indices is None and expected_extensions is not None and len(extensions) != expected_extensions:
+            raise PipelineError(f"{path.name}: expected {expected_extensions} image extensions, found {len(extensions)}")
 
         # FILTER/EXPTIME normally live in the primary header; fall back to
         # the first extension if a given night's files put them there.
@@ -199,7 +352,7 @@ class Frame:
         return cls(path=path, extensions=extensions, header=primary_header, filt=filt, exptime=exptime)
 
     def write(self, out_path: Path) -> None:
-        """Write the whole exposure back out as one MEF file (primary + N image HDUs)."""
+        """Atomically write the exposure as one MEF file (primary + image HDUs)."""
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         primary = fits.PrimaryHDU(header=self.header)
@@ -207,32 +360,63 @@ class Frame:
         for ext in self.extensions:
             hdu = fits.ImageHDU(data=ext.data, header=ext.header, name=ext.name)
             hdus.append(hdu)
-        fits.HDUList(hdus).writeto(out_path, overwrite=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{out_path.name}.", suffix=".tmp", dir=out_path.parent
+        )
+        os.close(descriptor)
+        temporary_path = Path(temporary_name)
+        try:
+            fits.HDUList(hdus).writeto(temporary_path, overwrite=True)
+            written = FrameReference.from_fits(temporary_path, expected_extensions=self.n_ext)
+            expected = {ext.index: ext.shape for ext in self.extensions}
+            if written.shapes != expected:
+                raise PipelineError(
+                    f"written output {temporary_path} has extension shapes {written.shapes}, expected {expected}"
+                )
+            os.replace(temporary_path, out_path)
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
+
+
+FrameLike = Frame | FrameReference
 
 
 class FrameCollection:
-    """A queryable, filterable set of Frames."""
+    """A queryable set of loaded frames or lightweight frame references."""
 
-    def __init__(self, frames: Optional[list[Frame]] = None) -> None:
-        self._frames: list[Frame] = list(frames) if frames else []
+    def __init__(self, frames: Optional[Sequence[FrameLike]] = None) -> None:
+        self._frames: list[FrameLike] = list(frames) if frames else []
 
-    def __iter__(self) -> Iterator[Frame]:
+    def __iter__(self) -> Iterator[FrameLike]:
         return iter(self._frames)
 
     def __len__(self) -> int:
         return len(self._frames)
 
-    def __contains__(self, frame: Frame) -> bool:
+    def __contains__(self, frame: FrameLike) -> bool:
         return any(f.frame_id == frame.frame_id for f in self._frames)
 
-    def add(self, frame: Frame) -> None:
+    def add(self, frame: FrameLike) -> None:
         self._frames.append(frame)
 
     def by_filter(self, filt: str) -> "FrameCollection":
         return FrameCollection([f for f in self._frames if f.filt == filt])
 
-    def by_predicate(self, predicate: Callable[[Frame], bool]) -> "FrameCollection":
+    def by_obstype(self, obstype: str) -> "FrameCollection":
+        """Select frames by the FITS OBSTYPE value, case and space normalized."""
+        normalized = str(obstype).strip().lower()
+        return FrameCollection([f for f in self._frames if f.obstype == normalized])
+
+    def by_predicate(self, predicate: Callable[[FrameLike], bool]) -> "FrameCollection":
         return FrameCollection([f for f in self._frames if predicate(f)])
+
+    def batches(self, batch_size: int) -> Iterator[list[FrameLike]]:
+        """Yield bounded slices while keeping collection ordering deterministic."""
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+        for start in range(0, len(self._frames), batch_size):
+            yield self._frames[start : start + batch_size]
 
     @classmethod
     def from_directory(
@@ -242,25 +426,25 @@ class FrameCollection:
         expected_extensions: Optional[int] = None,
     ) -> "FrameCollection":
         directory = Path(directory)
-        logger.info("Starting FITS discovery and loading in %s (pattern=%s)", directory, pattern)
+        logger.info("Starting FITS metadata discovery in %s (pattern=%s)", directory, pattern)
         files = sorted(directory.glob(pattern))
         total = len(files)
         logger.info("Discovered %d FITS file(s) in %s", total, directory)
         frames = []
         progress_interval = max(1, (total + 99) // 100)
         for index, path in enumerate(files, start=1):
-            logger.debug("Loading FITS file %d/%d: %s", index, total, path.name)
+            logger.debug("Reading FITS metadata %d/%d: %s", index, total, path.name)
             try:
-                frame = Frame.from_fits(path, expected_extensions=expected_extensions)
+                frame = FrameReference.from_fits(path, expected_extensions=expected_extensions)
             except Exception:
-                logger.exception("Failed to load FITS file %s from %s", path.name, directory)
+                logger.exception("Failed to inspect FITS file %s from %s", path.name, directory)
                 raise
             frames.append(frame)
             if index % progress_interval == 0 or index == total:
                 percent = 100.0 * index / total if total else 100.0
-                logger.info("FITS loading progress: %d/%d file(s) (%.1f%%)", index, total, percent)
+                logger.info("FITS discovery progress: %d/%d file(s) (%.1f%%)", index, total, percent)
 
         if total == 0:
-            logger.info("FITS loading progress: 0/0 file(s) (0.0%)")
-        logger.info("Completed FITS loading: %d/%d file(s) from %s", len(frames), total, directory)
+            logger.info("FITS discovery progress: 0/0 file(s) (0.0%)")
+        logger.info("Completed FITS metadata discovery: %d/%d file(s) from %s", len(frames), total, directory)
         return cls(frames)

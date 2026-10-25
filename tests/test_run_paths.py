@@ -79,6 +79,8 @@ def test_run_reads_from_same_run_dir(tmp_path, monkeypatch):
         def __init__(self, stages, manifest_path):
             captured["manifest"] = manifest_path
             captured["dark_dir"] = stages[0].config.dark_dir
+            captured["workers"] = stages[0].n_workers
+            captured["batch_size"] = stages[0].batch_size
         def run(self, frames):
             captured["n"] = len(frames)
             return frames
@@ -87,11 +89,20 @@ def test_run_reads_from_same_run_dir(tmp_path, monkeypatch):
     res = CliRunner().invoke(app, [
         "run", "--config-path", str(_write_config(tmp_path)),
         "--base-dir", str(tmp_path / "out"), "--proposal", "P1", "--night", "2025-05-13",
+        "--workers", "2", "--batch-size", "3",
     ])
     assert res.exit_code == 0, res.output
     assert captured["n"] == 1
     assert captured["manifest"] == tmp_path / "out" / "P1_2025-05-13" / "pipeline_state.json"
     assert captured["dark_dir"] == raw
+    assert captured["workers"] == 2 and captured["batch_size"] == 3
+
+
+def test_run_help_shows_memory_controls():
+    res = CliRunner().invoke(app, ["run", "--help"])
+    assert res.exit_code == 0
+    assert "--batch-size" in res.output
+    assert "--workers" in res.output
 
 
 def test_missing_proposal_and_night_errors(tmp_path):

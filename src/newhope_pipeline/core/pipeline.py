@@ -5,7 +5,8 @@ import logging
 from pathlib import Path
 from time import monotonic
 
-from .frame import FrameCollection
+from .exceptions import PipelineError
+from .frame import FrameCollection, FrameReference
 from .stage import PipelineStage
 from .state import PipelineState
 
@@ -20,6 +21,21 @@ class Pipeline:
     def run(self, frames: FrameCollection) -> FrameCollection:
         started = monotonic()
         initial_count = len(frames)
+        input_kinds = {isinstance(frame, FrameReference) for frame in frames}
+        if len(input_kinds) > 1:
+            raise PipelineError("pipeline input cannot mix loaded Frames and FrameReference objects")
+        reference_input = input_kinds == {True}
+        if reference_input:
+            for stage in self.stages:
+                if stage.output_dir is None:
+                    stage.output_dir = (
+                        self.state.manifest_path.parent / "processed" / stage.name
+                    )
+                    logger.info(
+                        "Stage %s has no output directory; persisting reference-based results under %s",
+                        stage.name,
+                        stage.output_dir,
+                    )
         current = frames
         logger.info(
             "Pipeline started: %d frame(s), %d stage(s), manifest=%s",

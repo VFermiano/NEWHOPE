@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import warnings
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from time import monotonic
 from typing import Optional, Sequence
 
@@ -39,8 +39,8 @@ from astropy.time import Time
 from scipy import ndimage
 
 from ..config import SkyConfig
-from ..core.exceptions import ReductionError
-from ..core.frame import Frame, FrameCollection
+from ..core.exceptions import ReductionError, detach_traceback
+from ..core.frame import Frame, FrameCollection, FrameLike, FrameReference
 from ..core.stage import PipelineStage
 from ..core.state import PipelineState
 
@@ -235,8 +235,14 @@ def obs_time_seconds(frame: Frame) -> float:
 class SkySubtraction(PipelineStage):
     name = "sky_subtraction"
 
-    def __init__(self, config, n_workers: int = 1, timeout: float | None = None) -> None:
-        super().__init__(config, n_workers=n_workers, timeout=timeout)
+    def __init__(
+        self,
+        config,
+        n_workers: int = 1,
+        timeout: float | None = None,
+        batch_size: int = 1,
+    ) -> None:
+        super().__init__(config, n_workers=n_workers, timeout=timeout, batch_size=batch_size)
         self.sky: SkyConfig = getattr(config, "sky", None) or SkyConfig()
 
     def process(self, frame: Frame) -> Frame:
@@ -247,8 +253,13 @@ class SkySubtraction(PipelineStage):
 
     # ------------------------------------------------------------------ run
     def run(self, frames: FrameCollection, state: PipelineState) -> FrameCollection:
-        started = monotonic()
         pool = list(frames)
+        if all(isinstance(frame, FrameReference) for frame in pool):
+            return self._run_references(pool, state)
+        return self._run_loaded(pool, state)
+
+    def _run_loaded(self, pool: list[FrameLike], state: PipelineState) -> FrameCollection:
+        started = monotonic()
         restored: dict[str, Frame] = {}
         pending: list[Frame] = []
         for f in pool:
@@ -294,7 +305,7 @@ class SkySubtraction(PipelineStage):
                 output.add(restored[f.frame_id])
             elif f.frame_id in pending_ids:
                 outcome = results.get(f.frame_id) or ReductionError("frame was not processed")
-                self._record(f.frame_id, outcome, state, output)
+                self._record(f, outcome, state, output)
             if index % progress_interval == 0 or index == len(pool):
                 logger.info(
                     "%s: result handling progress %d/%d (%.1f%%)",
@@ -313,6 +324,351 @@ class SkySubtraction(PipelineStage):
             monotonic() - started,
         )
         return output
+
+    def _run_references(
+        self, pool: list[FrameReference], state: PipelineState
+    ) -> FrameCollection:
+        """Reduce reference inputs one target at a time with a temporal halo in memory."""
+        started = monotonic()
+        if self.output_dir is None:
+            self.output_dir = state.manifest_path.parent / "processed" / self.name
+            logger.info("%s: persisting lazy sky products under %s", self.name, self.output_dir)
+        restored: dict[str, FrameReference] = {}
+        pending: list[FrameReference] = []
+        for frame in pool:
+            cached = self._restore_cached(frame, state)
+            if cached is None:
+                pending.append(frame)
+            else:
+                assert isinstance(cached, FrameReference)
+                restored[frame.frame_id] = cached
+
+        pending_ids = {frame.frame_id for frame in pending}
+        groups: dict[tuple, list[FrameReference]] = defaultdict(list)
+        for frame in pool:
+            groups[self._group_key(frame)].append(frame)
+
+        plans: dict[str, list[FrameReference]] = {}
+        failures: dict[str, Exception] = {}
+        for key, members in groups.items():
+            times: dict[str, float] = {}
+            for frame in members:
+                try:
+                    times[frame.frame_id] = obs_time_seconds(frame)
+                except ReductionError as exc:
+                    if frame.frame_id in pending_ids:
+                        failures[frame.frame_id] = exc
+            usable = [frame for frame in members if frame.frame_id in times]
+            time_values = [times[frame.frame_id] for frame in usable]
+            index_by_id = {frame.frame_id: index for index, frame in enumerate(usable)}
+            for target in usable:
+                if target.frame_id not in pending_ids:
+                    continue
+                target_index = index_by_id[target.frame_id]
+                allowed = [
+                    index for index, candidate in enumerate(usable)
+                    if candidate.shapes == target.shapes
+                ]
+                neighbor_indices = select_neighbors(
+                    target_index,
+                    time_values,
+                    self.sky.n_neighbors,
+                    self.sky.max_time_gap_s,
+                    allowed,
+                )
+                neighbors = [usable[index] for index in neighbor_indices]
+                logger.debug(
+                    "%s: selected %d neighbor(s) for %s from %d shape-compatible candidate(s)",
+                    self.name,
+                    len(neighbors),
+                    target.path.name,
+                    len(allowed) - 1,
+                )
+                if len(neighbors) < self.sky.min_neighbors:
+                    failures[target.frame_id] = ReductionError(
+                        f"{target.path.name}: only {len(neighbors)} other exposure(s) of the same "
+                        f"filter/sequence within {self.sky.max_time_gap_s:.0f} s "
+                        f"(need {self.sky.min_neighbors}); cannot build a sky"
+                    )
+                else:
+                    plans[target.frame_id] = neighbors
+            logger.info(
+                "%s: group %s has %d frame(s), %d pending target(s)",
+                self.name,
+                key,
+                len(members),
+                sum(frame.frame_id in pending_ids for frame in members),
+            )
+
+        if restored:
+            logger.info("%s: skipping %d already-completed frame(s)", self.name, len(restored))
+        logger.info(
+            "%s: processing started; input=%d, pending=%d, cached=%d, batch_size=%d, workers=%d; "
+            "sky targets use one target plus its iteration neighbor halo; at most %d task(s) in flight",
+            self.name,
+            len(pool),
+            len(pending),
+            len(restored),
+            self.batch_size,
+            self.n_workers,
+            min(self.batch_size, self.n_workers, len(pending)) if pending else 0,
+        )
+
+        output = FrameCollection()
+        progress_interval = max(1, (len(pool) + 99) // 100)
+        next_progress = progress_interval
+        failed = 0
+        effective_workers = min(self.n_workers, self.batch_size, len(pending)) if pending else 1
+        target_executor = (
+            ThreadPoolExecutor(max_workers=effective_workers, thread_name_prefix="sky-target")
+            if effective_workers > 1
+            else None
+        )
+        try:
+            for start in range(0, len(pool), self.batch_size):
+                batch = pool[start : start + self.batch_size]
+                targets = [
+                    frame for frame in batch
+                    if frame.frame_id not in restored
+                    and frame.frame_id not in failures
+                    and frame.frame_id in plans
+                ]
+                batch_ids = {frame.frame_id for frame in batch}
+                batch_output: dict[str, FrameReference] = {
+                    frame_id: restored[frame_id]
+                    for frame_id in batch_ids.intersection(restored)
+                }
+
+                def record_one(frame: FrameReference, outcome: Frame | Exception) -> None:
+                    nonlocal failed
+                    recorded = FrameCollection()
+                    self._record(frame, outcome, state, recorded)
+                    if recorded:
+                        result = next(iter(recorded))
+                        assert isinstance(result, FrameReference)
+                        batch_output[frame.frame_id] = result
+                    else:
+                        failed += 1
+
+                if target_executor is None:
+                    for frame in targets:
+                        try:
+                            outcome = self._reduce_reference_target(frame, plans, pending_ids)
+                        except Exception as exc:  # noqa: BLE001 -- per-frame failure recovery
+                            logger.exception("%s failed while reducing target %s", self.name, frame.path.name)
+                            outcome = detach_traceback(exc)
+                        record_one(frame, outcome)
+                        del outcome
+                else:
+                    next_target = iter(targets)
+                    future_targets = {}
+                    while True:
+                        while len(future_targets) < effective_workers:
+                            try:
+                                frame = next(next_target)
+                            except StopIteration:
+                                break
+                            future_targets[
+                                target_executor.submit(
+                                    self._reduce_reference_target, frame, plans, pending_ids
+                                )
+                            ] = frame
+                        if not future_targets:
+                            break
+                        done, _ = wait(future_targets, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            frame = future_targets.pop(future)
+                            try:
+                                outcome = future.result()
+                            except Exception as exc:  # noqa: BLE001 -- per-frame failure recovery
+                                logger.exception("%s failed while reducing target %s", self.name, frame.path.name)
+                                outcome = detach_traceback(exc)
+                            record_one(frame, outcome)
+                            del outcome, future
+                        done.clear()
+
+                for offset, frame in enumerate(batch, start=1):
+                    index = start + offset
+                    if frame.frame_id not in restored:
+                        logger.info(
+                            "%s: target %d/%d %s (batch_size=%d, workers=%d)",
+                            self.name,
+                            index,
+                            len(pool),
+                            frame.path.name,
+                            self.batch_size,
+                            effective_workers,
+                        )
+                        if frame.frame_id in failures:
+                            outcome: Frame | Exception = failures[frame.frame_id]
+                        elif frame.frame_id not in plans:
+                            outcome = ReductionError(f"{frame.path.name}: no usable sky plan was created")
+                        else:
+                            # Successful targets were persisted as soon as the
+                            # worker completed; failures are recorded here.
+                            outcome = None
+                        if outcome is not None:
+                            record_one(frame, outcome)
+                        del outcome
+                    if frame.frame_id in batch_output:
+                        output.add(batch_output[frame.frame_id])
+                completed = start + len(batch)
+                if completed >= next_progress or completed == len(pool):
+                    logger.info(
+                        "%s: completed=%d/%d, skipped=%d, failed=%d",
+                        self.name,
+                        completed,
+                        len(pool),
+                        len(restored),
+                        failed,
+                    )
+                    next_progress = completed + progress_interval
+                batch_output.clear()
+        finally:
+            if target_executor is not None:
+                target_executor.shutdown(wait=True)
+        logger.info(
+            "%s: processing complete; input=%d, successful=%d, failed=%d, resumed=%d, elapsed=%.1fs",
+            self.name,
+            len(pool),
+            len(output),
+            len(pool) - len(output),
+            len(restored),
+            monotonic() - started,
+        )
+        return output
+
+    def _reduce_reference_target(
+        self,
+        target: FrameReference,
+        plans: dict[str, list[FrameReference]],
+        pending_ids: set[str],
+    ) -> Frame:
+        """Load one target's neighbor/iteration halo and apply the existing sky math."""
+        iterations = self.sky.iterations
+        target_id = target.frame_id
+        needed_masks: list[set[str]] = [set() for _ in range(iterations + 1)]
+        needed_masks[iterations] = {target_id} | {neighbor.frame_id for neighbor in plans[target_id]}
+        update_outputs: list[set[str]] = [set() for _ in range(iterations)]
+        plan_ids = set(plans)
+        for iteration in range(iterations, 0, -1):
+            update_outputs[iteration - 1] = needed_masks[iteration] & plan_ids
+            prior_masks = set(update_outputs[iteration - 1])
+            for frame_id in update_outputs[iteration - 1]:
+                prior_masks.update(neighbor.frame_id for neighbor in plans[frame_id])
+            needed_masks[iteration - 1] = prior_masks
+
+        data_ids = {target_id}
+        data_ids.update(neighbor.frame_id for neighbor in plans[target_id])
+        for output_ids in update_outputs:
+            for frame_id in output_ids:
+                data_ids.add(frame_id)
+                data_ids.update(neighbor.frame_id for neighbor in plans[frame_id])
+        references = {frame.frame_id: frame for neighbors in plans.values() for frame in neighbors}
+        references.update({target_id: target})
+        # Plan targets can occur only as values in the neighbor lists; add all
+        # target references passed through the group plan.
+        for frame_id in data_ids:
+            if frame_id not in references:
+                raise ReductionError(f"missing reference for sky dependency {frame_id}")
+
+        logger.debug(
+            "%s: %s requires %d halo frame(s) over %d detector extension(s)",
+            self.name,
+            target.path.name,
+            len(data_ids),
+            target.n_ext,
+        )
+        loaded_target = target.load()
+        output_arrays: list[np.ndarray] = []
+        levels: list[float] = []
+        for extension in target.extensions:
+            idx = extension.index
+            data: dict[str, np.ndarray] = {target_id: loaded_target[idx].data}
+            for frame_id in data_ids - {target_id}:
+                reference = references[frame_id]
+                data[frame_id] = reference.load(extension_indices=[idx])[idx].data
+            bad_masks = {frame_id: bad_pixel_mask(array) for frame_id, array in data.items()}
+
+            def detect(
+                arr: np.ndarray,
+                bad_mask: np.ndarray,
+                level: float | None = None,
+            ):
+                if level is None:
+                    good = arr[~bad_mask]
+                    level = float(np.median(good)) if good.size else 0.0
+                return detect_objects(
+                    arr,
+                    bad_mask,
+                    self.sky.detect_nsigma,
+                    self.sky.detect_smooth_pix,
+                    self.sky.mask_grow_pix,
+                    self.sky.background_box,
+                    floor=self.sky.detect_floor_frac * abs(level),
+                )
+
+            masks = {
+                frame_id: (
+                    bad_masks[frame_id].copy()
+                    if frame_id in plan_ids
+                    else detect(data[frame_id], bad_masks[frame_id])
+                )
+                for frame_id in data
+            }
+            final_output = None
+            final_level = None
+            failed_outputs: dict[str, ReductionError] = {}
+            for iteration in range(iterations + 1):
+                active = set(update_outputs[iteration]) if iteration < iterations else set()
+                if iteration == iterations:
+                    active.add(target_id)
+                next_masks: dict[str, np.ndarray] = {}
+                for frame_id in active:
+                    if frame_id in failed_outputs:
+                        continue
+                    neighbors = plans.get(frame_id)
+                    if not neighbors:
+                        continue
+                    try:
+                        samples = [
+                            (data[neighbor.frame_id], masks[neighbor.frame_id],
+                             sky_level(data[neighbor.frame_id], masks[neighbor.frame_id]))
+                            for neighbor in neighbors
+                        ]
+                        normalized_sky = build_sky(
+                            samples, self.sky.mode, self.sky.min_valid, self.sky.background_box
+                        )
+                        level = fit_level(data[frame_id], masks[frame_id], normalized_sky, self.sky.mode)
+                        sky_image = (
+                            normalized_sky * np.float32(level)
+                            if self.sky.mode == "scale"
+                            else normalized_sky + np.float32(level)
+                        )
+                        corrected = (data[frame_id] - sky_image).astype(np.float32)
+                        corrected[bad_masks[frame_id]] = data[frame_id][bad_masks[frame_id]]
+                        if frame_id == target_id and iteration == iterations:
+                            final_output, final_level = corrected, level
+                        elif iteration < iterations:
+                            # Compute masks against this pass's old masks, then
+                            # install them together as the next iteration does.
+                            next_masks[frame_id] = detect(corrected, bad_masks[frame_id], level)
+                    except ReductionError as exc:
+                        failed_outputs[frame_id] = detach_traceback(exc)
+                        # A failed halo frame keeps its previous mask, matching
+                        # the current group reducer's per-target continuation.
+                        if frame_id == target_id and iteration == iterations:
+                            raise
+                masks.update(next_masks)
+            if target_id in failed_outputs:
+                raise failed_outputs[target_id]
+            if final_output is None or final_level is None:
+                raise ReductionError(f"{target.path.name}: failed to construct sky for extension {idx}")
+            output_arrays.append(final_output)
+            levels.append(final_level)
+            del data, bad_masks, masks
+
+        return self._assemble(loaded_target, output_arrays, levels, len(plans[target_id]))
 
     def _group_key(self, frame: Frame) -> tuple:
         return (frame.filt,) + tuple(str(_header_value(frame, k)) for k in self.sky.group_keys)

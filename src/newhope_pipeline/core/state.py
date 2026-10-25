@@ -6,6 +6,8 @@ Replaces ad hoc checkpoint files: a single JSON manifest, keyed by
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,4 +63,19 @@ class PipelineState:
 
     def _save(self) -> None:
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        self.manifest_path.write_text(json.dumps(self._done, indent=2))
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{self.manifest_path.name}.", suffix=".tmp", dir=self.manifest_path.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(self._done, stream, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_name, self.manifest_path)
+        except Exception:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            Path(temporary_name).unlink(missing_ok=True)
+            raise
