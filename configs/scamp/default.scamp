@@ -1,0 +1,21 @@
+# SCAMP astrometric calibration defaults for NEWFIRM detector images.
+# GAIA-EDR3 is queried as the absolute reference catalog. Network access to
+# the configured SCAMP reference service is required unless using FILE.
+ASTREF_CATALOG         GAIA-EDR3
+ASTREF_BAND            DEFAULT
+ASTREFMAG_LIMITS       -99.0,99.0
+CENTROID_KEYS          XWIN_IMAGE,YWIN_IMAGE
+CENTROIDERR_KEYS       ERRAWIN_IMAGE,ERRBWIN_IMAGE,ERRTHETAWIN_IMAGE
+DISTORT_KEYS           XWIN_IMAGE,YWIN_IMAGE
+PHOTFLUX_KEY           FLUX_AUTO
+PHOTFLUXERR_KEY        FLUXERR_AUTO
+SOLVE_ASTROM           Y
+SOLVE_PHOTOM            N
+DISTORT_DEGREES        2
+ASTRCLIP_NSIGMA         3.0
+HEADER_SUFFIX           .head
+HEADER_TYPE             NORMAL
+NTHREADS                1
+WRITE_XML               Y
+XML_NAME                scamp.xml
+VERBOSE_TYPE            NORMAL

@@ -4,6 +4,7 @@ Usage:
     newhope-pipeline download --base-dir /path/to/data --proposal 2025A-599150 --night 2025-05-13
     newhope-pipeline run      --base-dir /path/to/data --proposal 2025A-599150 --night 2025-05-13
 """
+
 from __future__ import annotations
 
 import logging
@@ -13,6 +14,8 @@ from pathlib import Path
 import typer
 
 from .acquisition.noirlab import download_night, save_credentials
+from .astrometry.calibrate import AstrometricCalibration, check_astrometry_tools
+from .astrometry.stack import ImageStacking, check_stacking_tools
 from .config import AcquisitionConfig, PipelineConfig
 from .core.exceptions import AcquisitionError
 from .core.frame import FrameCollection
@@ -31,7 +34,9 @@ _LOGGING_HANDLERS: list[logging.Handler] = []
 _PREVIOUS_ROOT_LEVEL: int | None = None
 
 
-def _setup_logging(verbose: bool = False, log_file: Path | None = None) -> list[logging.Handler]:
+def _setup_logging(
+    verbose: bool = False, log_file: Path | None = None
+) -> list[logging.Handler]:
     """Set up consistent console/file logging without accumulating handlers."""
     global _PREVIOUS_ROOT_LEVEL
     _cleanup_logging()
@@ -55,7 +60,9 @@ def _setup_logging(verbose: bool = False, log_file: Path | None = None) -> list[
             file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
         except OSError as exc:
             _cleanup_logging(handlers)
-            raise typer.BadParameter(f"cannot create log file {log_file}: {exc}") from exc
+            raise typer.BadParameter(
+                f"cannot create log file {log_file}: {exc}"
+            ) from exc
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
         handlers.append(file_handler)
@@ -104,14 +111,20 @@ def _resolve_target(
 @app.command()
 def download(
     night: str = typer.Option(None, "--night", help="Observing night, YYYY-MM-DD"),
-    proposal: str = typer.Option(None, "--proposal", help="Proposal ID, e.g. 2025A-599150"),
+    proposal: str = typer.Option(
+        None, "--proposal", help="Proposal ID, e.g. 2025A-599150"
+    ),
     base_dir: Path = typer.Option(
-        None, "--base-dir", help="Parent directory; a <proposal>_<night>/ run folder is created inside it"
+        None,
+        "--base-dir",
+        help="Parent directory; a <proposal>_<night>/ run folder is created inside it",
     ),
     config_path: Path = typer.Option(Path("configs/default.yaml")),
     dry_run: bool = typer.Option(False, help="List matches without downloading"),
     set_credentials: bool = typer.Option(
-        False, "--set-credentials", help="Store your NOIRLab email/password locally and exit"
+        False,
+        "--set-credentials",
+        help="Store your NOIRLab email/password locally and exit",
     ),
 ) -> None:
     """Download raw science + calibration frames from the NOIRLab archive.
@@ -134,7 +147,9 @@ def download(
         acquisition = (config.acquisition or AcquisitionConfig()).model_copy(
             update={"proposal": proposal, "night": night}
         )
-        paths = config.resolve_paths(proposal, night, base_dir=base_dir, create=not dry_run)
+        paths = config.resolve_paths(
+            proposal, night, base_dir=base_dir, create=not dry_run
+        )
         logger.info(
             "Starting download: proposal=%s, night=%s, output_dir=%s, dry_run=%s",
             proposal,
@@ -147,7 +162,9 @@ def download(
         try:
             result = download_night(acquisition, outdir=paths.raw_dir, dry_run=dry_run)
         except AcquisitionError as exc:
-            logger.exception("NOIRLab download failed for proposal=%s night=%s", proposal, night)
+            logger.exception(
+                "NOIRLab download failed for proposal=%s night=%s", proposal, night
+            )
             typer.echo(f"Download failed: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
@@ -169,9 +186,13 @@ def download(
 @app.command()
 def run(
     night: str = typer.Option(None, "--night", help="Observing night, YYYY-MM-DD"),
-    proposal: str = typer.Option(None, "--proposal", help="Proposal ID, e.g. 2025A-599150"),
+    proposal: str = typer.Option(
+        None, "--proposal", help="Proposal ID, e.g. 2025A-599150"
+    ),
     base_dir: Path = typer.Option(
-        None, "--base-dir", help="Parent directory containing the <proposal>_<night>/ run folder"
+        None,
+        "--base-dir",
+        help="Parent directory containing the <proposal>_<night>/ run folder",
     ),
     config_path: Path = typer.Option(Path("configs/default.yaml")),
     download_first: bool = typer.Option(
@@ -191,10 +212,16 @@ def run(
         help="Log file path (default: <run directory>/pipeline.log)",
     ),
     batch_size: int | None = typer.Option(
-        None, "--batch-size", min=1, help="Maximum number of frame tasks in flight (default: config batch_size)"
+        None,
+        "--batch-size",
+        min=1,
+        help="Maximum number of frame tasks in flight (default: config batch_size)",
     ),
     workers: int | None = typer.Option(
-        None, "--workers", min=1, help="Worker processes / sky threads (default: config n_workers)"
+        None,
+        "--workers",
+        min=1,
+        help="Worker processes / sky threads (default: config n_workers)",
     ),
 ) -> None:
     """Run the reduction inside <base-dir>/<proposal>_<night>/.
@@ -228,6 +255,11 @@ def run(
         )
         logger.info("Persistent log file: %s", selected_log_file)
 
+        # Verify every external executable/configuration before download,
+        # decompression, or reduction work begins.
+        check_astrometry_tools(config.astrometry)
+        check_stacking_tools(config.stacking)
+
         if download_first:
             acquisition = (config.acquisition or AcquisitionConfig()).model_copy(
                 update={"proposal": proposal, "night": night}
@@ -236,7 +268,9 @@ def run(
             try:
                 download_result = download_night(acquisition, outdir=paths.raw_dir)
             except AcquisitionError as exc:
-                logger.exception("NOIRLab download failed for proposal=%s night=%s", proposal, night)
+                logger.exception(
+                    "NOIRLab download failed for proposal=%s night=%s", proposal, night
+                )
                 typer.echo(f"Download failed: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
             logger.info(
@@ -271,8 +305,14 @@ def run(
             typer.echo(f"Could not uncompress: {names}", err=True)
             raise typer.Exit(code=1)
 
-        frames = FrameCollection.from_directory(paths.raw_dir, expected_extensions=config.n_extensions)
-        logger.info("FITS discovery complete: %d frame reference(s) from %s", len(frames), paths.raw_dir)
+        frames = FrameCollection.from_directory(
+            paths.raw_dir, expected_extensions=config.n_extensions
+        )
+        logger.info(
+            "FITS discovery complete: %d frame reference(s) from %s",
+            len(frames),
+            paths.raw_dir,
+        )
         if len(frames) == 0:
             logger.error("No FITS frames found in %s", paths.raw_dir)
             raise typer.BadParameter(
@@ -291,7 +331,9 @@ def run(
             len(flat_frames),
         )
         if len(science_frames) == 0:
-            raise typer.BadParameter(f"No science FITS frames found in {paths.raw_dir}.")
+            raise typer.BadParameter(
+                f"No science FITS frames found in {paths.raw_dir}."
+            )
 
         reduction = config.reduction_for(paths)
         stages = [
@@ -307,10 +349,17 @@ def run(
                 batch_size=selected_batch_size,
                 calibration_frames=flat_frames,
             ),
-            SkySubtraction(reduction, n_workers=worker_count, batch_size=selected_batch_size),
-            # TODO: append AstrometricCalibration(config.astrometry, ...),
-            # PSFPhotometryStage(config.photometry, ...),
-            # VVVCalibrationStage(config.photometry, ...) once ported.
+            SkySubtraction(
+                reduction, n_workers=worker_count, batch_size=selected_batch_size
+            ),
+            AstrometricCalibration(
+                config.astrometry,
+                n_workers=worker_count,
+                batch_size=selected_batch_size,
+            ),
+            ImageStacking(
+                config.stacking, n_workers=worker_count, batch_size=selected_batch_size
+            ),
         ]
         for stage in stages:
             stage.output_dir = paths.output_dir / stage.name
@@ -335,13 +384,107 @@ def run(
         typer.echo(f"Done. {len(result)} of {len(frames)} frames processed.")
         if n_failed:
             typer.echo(
-                f"{n_failed} frame(s) failed; see {paths.manifest_path} for the per-stage errors.", err=True
+                f"{n_failed} frame(s) failed; see {paths.manifest_path} for the per-stage errors.",
+                err=True,
             )
             raise typer.Exit(code=1)
     except typer.Exit:
         raise
     except Exception:
         logger.exception("Run failed for proposal=%s night=%s", proposal, night)
+        raise
+    finally:
+        _cleanup_logging(handlers)
+
+
+@app.command()
+def stack(
+    night: str = typer.Option(None, "--night", help="Observing night, YYYY-MM-DD"),
+    proposal: str = typer.Option(
+        None, "--proposal", help="Proposal ID, e.g. 2025A-599150"
+    ),
+    base_dir: Path = typer.Option(
+        None,
+        "--base-dir",
+        help="Parent directory containing the <proposal>_<night>/ run folder",
+    ),
+    config_path: Path = typer.Option(Path("configs/default.yaml")),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable DEBUG logging"),
+    log_file: Path | None = typer.Option(None, "--log-file", help="Log file path"),
+    batch_size: int | None = typer.Option(
+        None, "--batch-size", min=1, help="Maximum number of detector groups in flight"
+    ),
+    workers: int | None = typer.Option(
+        None, "--workers", min=1, help="Worker processes (default: config n_workers)"
+    ),
+) -> None:
+    """Astrometrically calibrate and stack completed sky-subtraction products.
+
+    This command reads only processed/sky_subtraction/ and does not rerun
+    dark subtraction, flat fielding, or sky subtraction.
+    """
+    _force_message()
+    config = PipelineConfig.from_yaml(config_path)
+    worker_count = workers if workers is not None else config.n_workers
+    selected_batch_size = batch_size if batch_size is not None else config.batch_size
+    proposal, night = _resolve_target(config, proposal, night, config_path)
+    paths = config.resolve_paths(proposal, night, base_dir=base_dir, create=True)
+    selected_log_file = log_file or paths.run_dir / "pipeline.log"
+    handlers = _setup_logging(verbose=verbose, log_file=selected_log_file)
+    try:
+        check_astrometry_tools(config.astrometry)
+        check_stacking_tools(config.stacking)
+        input_dir = paths.output_dir / "sky_subtraction"
+        if not input_dir.is_dir():
+            raise typer.BadParameter(
+                f"Sky-subtraction products were not found in {input_dir}. Run `newhope-pipeline run` first."
+            )
+        frames = FrameCollection.from_directory(
+            input_dir, expected_extensions=config.n_extensions
+        )
+        if not frames:
+            raise typer.BadParameter(f"No FITS products found in {input_dir}.")
+        logger.info(
+            "Standalone stack started: proposal=%s, night=%s, input=%s, frames=%d, workers=%d, batch_size=%d",
+            proposal,
+            night,
+            input_dir,
+            len(frames),
+            worker_count,
+            selected_batch_size,
+        )
+        stages = [
+            AstrometricCalibration(
+                config.astrometry,
+                n_workers=worker_count,
+                batch_size=selected_batch_size,
+            ),
+            ImageStacking(
+                config.stacking,
+                n_workers=worker_count,
+                batch_size=selected_batch_size,
+            ),
+        ]
+        for stage in stages:
+            stage.output_dir = paths.output_dir / stage.name
+        result = Pipeline(stages, manifest_path=paths.manifest_path).run(frames)
+        failed = len(frames) - len(result)
+        typer.echo(
+            f"Stacking complete: {len(result)}/{len(frames)} frames included in valid detector stacks."
+        )
+        if failed:
+            typer.echo(
+                f"{failed} frame(s) failed astrometry or stacking; see {paths.manifest_path} and "
+                f"{paths.output_dir / 'stacking' / 'stack_manifest.json'}.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
+    except Exception:
+        logger.exception(
+            "Standalone stack failed for proposal=%s night=%s", proposal, night
+        )
         raise
     finally:
         _cleanup_logging(handlers)

@@ -1,0 +1,22 @@
+# Detector-specific coaddition of sky-subtracted images.
+IMAGEOUT_NAME          coadd.fits
+WEIGHTOUT_NAME         coadd.weight.fits
+WEIGHT_TYPE            NONE
+RESAMPLE               Y
+RESAMPLE_DIR           .
+RESAMPLE_SUFFIX        .resamp.fits
+COMBINE                Y
+COMBINE_TYPE           MEDIAN
+SUBTRACT_BACK          N
+BACK_TYPE              MANUAL
+BACK_DEFAULT           0.0
+RESAMPLE_TYPE           LANCZOS3
+PROJECTION_TYPE         TAN
+CENTER_TYPE             ALL
+PIXELSCALE_TYPE         MEDIAN
+PIXEL_SCALE             0.0
+IMAGE_SIZE              0
+NTHREADS                1
+MEM_MAX                 512
+VERBOSE_TYPE            NORMAL
+WRITE_XML               N

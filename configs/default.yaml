@@ -19,8 +19,34 @@ reduction:
     iterations: 2          # object-masked passes after the initial unmasked median
 
 astrometry:
+  sextractor_executable: sex
+  sextractor_config_path: configs/sextractor/default.sex
+  sextractor_parameters_path: configs/sextractor/default.param
+  sextractor_filter_path: configs/sextractor/default.conv
+  detection_threshold_sigma: 5.0
+  detection_minimum_area: 5
+  scamp_executable: scamp
   scamp_config_path: configs/scamp/default.scamp
+  reference_catalog: GAIA-EDR3
+  # For reference_catalog: FILE, set the local SCAMP reference catalog here.
+  # reference_catalog_path: data/calib/astrometric_catalog.fits
+  scamp_parameters: {}
   timeout_seconds: 120
+  keep_intermediates: true
+  reuse_intermediates: true
+
+stacking:
+  swarp_executable: swarp
+  swarp_config_path: configs/swarp/default.swarp
+  # null uses SWarp's median input pixel scale; set an arcsec/pixel value to override.
+  output_pixel_scale_arcsec: null
+  projection: TAN
+  resampling_method: LANCZOS3
+  combination_method: MEDIAN
+  minimum_exposures: 2
+  timeout_seconds: 600
+  keep_intermediates: false
+  reuse_intermediates: true
 
 photometry:
   vvv_catalog_path: data/calib/vvv_catalog.fits

@@ -3,6 +3,7 @@
 pydantic validates at load time (e.g. a bad filter name fails here,
 not three stages into a run).
 """
+
 from __future__ import annotations
 
 import re
@@ -28,12 +29,18 @@ class SkyConfig(BaseModel):
     # Header keywords (besides the filter) that must match for two exposures to
     # share a sky, i.e. to belong to the same dither sequence.
     group_keys: list[str] = Field(default_factory=lambda: ["OBJECT"])
-    iterations: int = Field(2, ge=1)  # object-masked passes after the initial unmasked median
-    detect_nsigma: float = Field(3.0, gt=0)  # object-mask threshold on the smoothed image
+    iterations: int = Field(
+        2, ge=1
+    )  # object-masked passes after the initial unmasked median
+    detect_nsigma: float = Field(
+        3.0, gt=0
+    )  # object-mask threshold on the smoothed image
     # Smallest object peak (as a fraction of the sky level) worth masking; fainter residuals are
     # below flat-field accuracy anyway and masking them only removes good sky pixels.
     detect_floor_frac: float = Field(0.002, ge=0)
-    detect_smooth_pix: float = Field(2.0, gt=0)  # gaussian sigma (pixels) before thresholding
+    detect_smooth_pix: float = Field(
+        2.0, gt=0
+    )  # gaussian sigma (pixels) before thresholding
     mask_grow_pix: int = Field(3, ge=0)  # dilation of the object mask
     background_box: int = Field(64, ge=8)  # block size of the coarse background
     min_valid: int = Field(3, ge=1)  # min unmasked samples per pixel; else interpolated
@@ -55,8 +62,45 @@ class ReductionConfig(BaseModel):
 
 
 class AstrometryConfig(BaseModel):
-    scamp_config_path: Path
-    timeout_seconds: float = 120.0
+    scamp_config_path: Path = Path("configs/scamp/default.scamp")
+    sextractor_executable: str = "sex"
+    sextractor_config_path: Path = Path("configs/sextractor/default.sex")
+    sextractor_parameters_path: Path = Path("configs/sextractor/default.param")
+    sextractor_filter_path: Path = Path("configs/sextractor/default.conv")
+    scamp_executable: str = "scamp"
+    reference_catalog: str = "GAIA-EDR3"
+    reference_catalog_path: Path | None = None
+    detection_threshold_sigma: float = Field(5.0, gt=0)
+    detection_minimum_area: int = Field(5, ge=1)
+    scamp_parameters: dict[str, str | int | float] = Field(default_factory=dict)
+    keep_intermediates: bool = True
+    reuse_intermediates: bool = True
+    timeout_seconds: float = Field(120.0, gt=0)
+
+
+class StackingConfig(BaseModel):
+    """SWarp settings and persistence controls for detector-specific stacks."""
+
+    swarp_executable: str = "swarp"
+    swarp_config_path: Path = Path("configs/swarp/default.swarp")
+    output_pixel_scale_arcsec: float | None = Field(default=None, gt=0)
+    projection: str = "TAN"
+    resampling_method: Literal[
+        "NEAREST", "BILINEAR", "LANCZOS2", "LANCZOS3", "LANCZOS4"
+    ] = "LANCZOS3"
+    combination_method: Literal[
+        "MEDIAN", "AVERAGE", "WEIGHTED", "SUM", "MIN", "MAX"
+    ] = "MEDIAN"
+    minimum_exposures: int = Field(2, ge=1)
+    keep_intermediates: bool = False
+    reuse_intermediates: bool = True
+    timeout_seconds: float = Field(600.0, gt=0)
+
+    @model_validator(mode="after")
+    def _check_projection(self) -> "StackingConfig":
+        if not self.projection.strip():
+            raise ValueError("stacking.projection cannot be empty")
+        return self
 
 
 class PhotometryConfig(BaseModel):
@@ -118,6 +162,7 @@ class PipelineConfig(BaseModel):
     n_extensions: int = 4
     reduction: ReductionConfig
     astrometry: AstrometryConfig
+    stacking: StackingConfig = Field(default_factory=StackingConfig)
     photometry: PhotometryConfig
     acquisition: AcquisitionConfig | None = None
 

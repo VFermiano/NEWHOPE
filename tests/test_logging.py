@@ -96,7 +96,9 @@ def test_frame_collection_reports_actual_loading_progress(tmp_path, caplog):
     assert any("1/3 file(s) (33.3%)" in message for message in messages)
     assert any("2/3 file(s) (66.7%)" in message for message in messages)
     assert any("3/3 file(s) (100.0%)" in message for message in messages)
-    assert any("Completed FITS metadata discovery: 3/3" in message for message in messages)
+    assert any(
+        "Completed FITS metadata discovery: 3/3" in message for message in messages
+    )
 
 
 def test_frame_collection_empty_directory_completes_without_division(tmp_path, caplog):
@@ -104,14 +106,24 @@ def test_frame_collection_empty_directory_completes_without_division(tmp_path, c
         frames = FrameCollection.from_directory(tmp_path)
     assert len(frames) == 0
     assert any("0/0 file(s) (0.0%)" in record.getMessage() for record in caplog.records)
-    assert any("Completed FITS metadata discovery: 0/0" in record.getMessage() for record in caplog.records)
+    assert any(
+        "Completed FITS metadata discovery: 0/0" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_frame_collection_logs_invalid_fits_and_extension_validation(tmp_path, caplog):
     make_mef(tmp_path / "wrong-count.fits", n_ext=2)
-    with caplog.at_level(logging.INFO), pytest.raises(PipelineError, match="expected 4"):
+    with (
+        caplog.at_level(logging.INFO),
+        pytest.raises(PipelineError, match="expected 4"),
+    ):
         FrameCollection.from_directory(tmp_path, expected_extensions=4)
-    failures = [record for record in caplog.records if "Failed to inspect FITS file" in record.getMessage()]
+    failures = [
+        record
+        for record in caplog.records
+        if "Failed to inspect FITS file" in record.getMessage()
+    ]
     assert failures and failures[-1].exc_info is not None
     assert not any("1/1 file(s)" in record.getMessage() for record in caplog.records)
 
@@ -121,7 +133,10 @@ def test_frame_collection_logs_invalid_fits_and_extension_validation(tmp_path, c
     (invalid_dir / "broken.fits").write_text("not a FITS file")
     with caplog.at_level(logging.INFO), pytest.raises(OSError):
         FrameCollection.from_directory(invalid_dir)
-    assert any("Failed to inspect FITS file broken.fits" in record.getMessage() for record in caplog.records)
+    assert any(
+        "Failed to inspect FITS file broken.fits" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 class _IdentityStage(PipelineStage):
@@ -131,7 +146,9 @@ class _IdentityStage(PipelineStage):
         return frame
 
 
-def test_pipeline_logs_stage_start_end_and_worker_count(tmp_path, synthetic_frame_file, caplog):
+def test_pipeline_logs_stage_start_end_and_worker_count(
+    tmp_path, synthetic_frame_file, caplog
+):
     frames = FrameCollection([Frame.from_fits(synthetic_frame_file)])
     stage = _IdentityStage(config=None, n_workers=1)
     with caplog.at_level(logging.INFO):
@@ -139,9 +156,16 @@ def test_pipeline_logs_stage_start_end_and_worker_count(tmp_path, synthetic_fram
 
     assert len(result) == 1
     messages = [record.getMessage() for record in caplog.records]
-    assert any("Stage identity started: input=1, workers=1" in message for message in messages)
-    assert any("Stage identity completed: input=1, successful=1, failed=0" in message for message in messages)
-    assert any("Pipeline complete: successful=1/1, failed=0" in message for message in messages)
+    assert any(
+        "Stage identity started: input=1, workers=1" in message for message in messages
+    )
+    assert any(
+        "Stage identity completed: input=1, successful=1, failed=0" in message
+        for message in messages
+    )
+    assert any(
+        "Pipeline complete: successful=1/1, failed=0" in message for message in messages
+    )
 
 
 def test_run_cli_default_and_explicit_log_files_and_stage_order(tmp_path, monkeypatch):
@@ -155,6 +179,8 @@ def test_run_cli_default_and_explicit_log_files_and_stage_order(tmp_path, monkey
             return frames
 
     monkeypatch.setattr("newhope_pipeline.cli.Pipeline", FakePipeline)
+    monkeypatch.setattr("newhope_pipeline.cli.check_astrometry_tools", lambda *_: None)
+    monkeypatch.setattr("newhope_pipeline.cli.check_stacking_tools", lambda *_: None)
     config_path = _config(tmp_path)
 
     def run_once(base_dir: Path, extra_args: list[str]):
@@ -186,12 +212,21 @@ def test_run_cli_default_and_explicit_log_files_and_stage_order(tmp_path, monkey
 
     explicit_base = tmp_path / "explicit"
     explicit_log = tmp_path / "custom" / "debug.log"
-    explicit_result = run_once(explicit_base, ["--verbose", "--log-file", str(explicit_log)])
+    explicit_result = run_once(
+        explicit_base, ["--verbose", "--log-file", str(explicit_log)]
+    )
     assert explicit_result.exit_code == 0, explicit_result.output
     assert explicit_log.is_file()
     assert "DEBUG" in explicit_log.read_text()
     assert not (explicit_base / "P1_2025-05-11" / "pipeline.log").exists()
-    assert captured == [["dark_subtraction", "flat_fielding", "sky_subtraction"]] * 2
+    expected = [
+        "dark_subtraction",
+        "flat_fielding",
+        "sky_subtraction",
+        "astrometric_calibration",
+        "stacking",
+    ]
+    assert captured == [expected] * 2
 
 
 def test_run_help_includes_verbose_and_log_file_options():

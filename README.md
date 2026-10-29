@@ -5,10 +5,10 @@ near-infrared imaging data.
 
 ## Status
 
-Scaffold stage. `core/` (Frame, FrameCollection, PipelineStage, Pipeline,
-PipelineState) is implemented and tested. `reduction/`, `astrometry/`, and
-`photometry/` are stub classes with `TODO` markers where the existing
-script-based logic needs to be ported in.
+The pipeline performs dark subtraction, flat correction, and sky subtraction,
+then detects sources, calibrates each detector extension with SCAMP, and writes
+detector-specific SWarp stacks. PSF photometry and VVV photometric calibration
+remain future stages.
 
 
 ## Multi-extension frames
@@ -88,11 +88,14 @@ newhope-pipeline run \
     --verbose
 ```
 
-Each stage writes its result to `<run>/processed/<stage name>/` (dark_subtraction,
-flat_fielding, sky_subtraction) and records it in `pipeline_state.json`. Re-running
-the same command resumes from structurally valid products without loading completed
-raw images. Delete a stage's folder (or the manifest) to force it to be redone. The
-command exits with code 1 if any frame failed in any stage.
+Reduction and astrometry stages write MEFs to `<run>/processed/<stage name>/`
+(`dark_subtraction`, `flat_fielding`, `sky_subtraction`, and
+`astrometric_calibration`). Stacking writes one detector image per compatible
+science group under `processed/stacking/` and records frame status in
+`pipeline_state.json`. Re-running resumes from valid products. Astrometry and
+stack caches include input file metadata and relevant configuration; changed
+inputs or settings trigger recalibration or restacking. The command exits with
+code 1 if any frame fails in any stage.
 
 `FrameCollection.from_directory()` discovers header-only `FrameReference` objects;
 pixel arrays are loaded only when a stage needs them. Independent stages load a frame
@@ -102,9 +105,10 @@ overrides the configured worker count. The configuration keys are `batch_size` a
 `n_workers`. At most `min(batch_size, workers)` independent-frame tasks run at once.
 Each active task can hold its input and output arrays together, so ordinary stages
 use at most about `2 * min(batch_size, workers)` full science-frame equivalents, plus
-the required calibration masters and FITS/library buffers. With the default batch
-size of one, independent stages process one frame at a time even if more workers are
-configured.
+calibration masters and FITS/library buffers. Astrometry handles one MEF per task.
+Stacking extracts one detector extension at a time to temporary single-image FITS
+files, then starts no more than `min(batch_size, workers)` SWarp jobs, each configured
+for one internal thread. With batch size one, these stages use one task at a time.
 
 Sky subtraction keeps its existing filter/object grouping, nearest-time neighbor
 selection, masks, scaling, and iterative median. Each active target loads its required
@@ -116,9 +120,9 @@ plus masks and the bounded median workspace. `H` is the closure through
 Sky targets use at most `min(batch_size, workers)` concurrent tasks; completed target
 products are written before replacement work is submitted. Raising either limit
 increases peak RAM.
-Dark and flat correction use the existing prebuilt master products; dark and flat
-calibration caches are each capped to one matching key/filter per stage instance, so
-calibration arrays do not grow with exposure count. FITS data are read with memory
+Dark and flat masters are built from the run's raw `OBSTYPE=dark` and `OBSTYPE=dflat`
+frames when needed; calibration caches are capped so arrays do not grow with exposure
+count. FITS data are read with memory
 mapping disabled and copied to float32 arrays, which also works for compressed
 extensions and avoids retaining arrays tied to open FITS handles.
 
@@ -173,19 +177,83 @@ Output headers get `SKYSUB`, `SKYMODE`, `SKYNFRM`, `SKYITER`, `SKYLEVEL`. All op
 live under `reduction.sky` in the config (`SkyConfig`). A frame with fewer than
 `min_neighbors` usable exposures fails (it is not subtracted with a bad sky).
 
-## Migration order
+## Astrometry and stacking
 
-See the project notes / conversation history for the recommended order:
+The full `run` command continues from sky subtraction through astrometry and
+stacking. The standalone command runs only those final steps on products already
+written under `processed/sky_subtraction/`:
 
-1. `Frame` / `FrameCollection` -- done.
-2. `PipelineStage` + trivial `Pipeline` -- done.
-3. NOIRLab data acquisition (`acquisition/noirlab.py`) -- done.
-4. Port `DarkSubtraction.process()` from the existing dark-subtraction
-   script; verify output matches the old pipeline on real data.
-5. Wire up persistent `PipelineState` resume behavior end to end.
-6. Port `FlatFielding`, `SkySubtraction`.
-7. Port the scamp wrapper into `AstrometricCalibration`
-   (`astrometry/scamp_wrapper.py`, `astrometry/calibrate.py`).
-8. Port PSF photometry and VVV calibration
-   (`photometry/psf_photometry.py`, `photometry/vvv_calibration.py`).
-9. Add tests for each stage as it's ported, not after.
+```bash
+newhope-pipeline stack \
+    --proposal 2025B-584787 \
+    --night 2026-05-29 \
+    --base-dir /path/to/data \
+    --workers 2 \
+    --batch-size 1
+```
+
+`stack` reads only `processed/sky_subtraction/`; it does not run dark, flat, or sky
+subtraction. Inputs must have `SKYSUB=True` and compatible filter, target, detector,
+image dimensions, `EXPTIME`, `EXPCOADD`, `COADDS`, and `FSAMPLE` headers. Targets are read from
+`OBJECT`, falling back to `FIELD`, `TARGNAME`, and `OBJNAME`. Detector identity comes
+from each image extension's `DETECTOR` keyword; the 1-based FITS extension index is
+also retained so the four NEWFIRM channels are not combined together. The supplied
+2026-05-29 products identify extensions as `SCA022`, `SCA011`, `SCA013`, and `SCA019`
+at indices 1 through 4.
+
+For astrometry, each MEF detector extension is written to a temporary standalone
+image. SExtractor creates a FITS_LDAC catalog (5-sigma threshold and at least five
+connected pixels by default), and SCAMP uses that extension's existing celestial
+WCS as the initial solution and matches against GAIA-EDR3 by default. The SCAMP header is
+validated and merged into the extension WCS. An image without a usable initial WCS
+or valid SCAMP result fails explicitly; the pipeline does not invent a sky position
+or continue with an arbitrary WCS. Catalogs and `.head` results are kept under
+`processed/astrometric_calibration/intermediates/<frame id>/` by default.
+
+SWarp operates on temporary single-image detector FITS files, not on the empty
+primary HDU or the whole MEF. It writes one final image per filter, target, detector,
+and acquisition setup. Defaults are median combination, LANCZOS3 resampling, TAN
+projection, and no second background subtraction (sky has already been removed).
+A group needs at least two compatible exposures. The default output pixel scale is
+SWarp's median input scale; set `stacking.output_pixel_scale_arcsec` to a measured
+value if a fixed scale is desired. No NEWFIRM pixel scale is hardcoded.
+
+```text
+<run>/processed/
+    sky_subtraction/                 # sky-subtracted four-extension MEFs
+    astrometric_calibration/          # MEFs with per-extension SCAMP WCS
+        intermediates/<frame id>/     # SExtractor catalogs and SCAMP .head files
+    stacking/
+        stack_<filter>_<target>_<detector>_ext<index>_<id>.fits
+        *.fits.stack.json             # per-stack input mapping and settings
+        stack_manifest.json           # all groups and failures
+```
+
+Defaults live in `configs/sextractor/default.sex`, `configs/scamp/default.scamp`,
+and `configs/swarp/default.swarp`. Matching configuration blocks are `astrometry:`
+and `stacking:` in `configs/default.yaml`. Adjust the SExtractor threshold and SCAMP
+distortion degree after inspecting catalogs and astrometric residuals for the
+observing data. If reference-catalog network access is unavailable, set
+`astrometry.reference_catalog: FILE` and provide a SCAMP-compatible local catalog
+with `astrometry.reference_catalog_path`.
+
+SExtractor, SCAMP, and SWarp are external programs and are not installed by the
+Python package. Check availability with `sex -v`, `scamp -v`, and `swarp -v`, then
+configure executable paths if needed. The default `GAIA-EDR3` reference catalog is
+supported by SCAMP 2.10.0. At startup, the pipeline reads the available catalog
+names from the configured SCAMP executable, so `astrometry.reference_catalog` can
+select any catalog that executable supports. Both `run` and `stack` check programs
+and configuration files before processing and report missing dependencies. Source
+catalogs, SCAMP headers, and stack products are reused only when their inputs and
+settings match and the output WCS validates. Set `astrometry.keep_intermediates` or
+`stacking.keep_intermediates` to false to remove their intermediates; set the
+corresponding `reuse_intermediates` to false to recompute them. SWarp uses the
+configured `MEM_MAX` and one thread per job; SExtractor and SCAMP are also launched
+with one thread per task. Concurrent tasks are limited by the pipeline's worker and
+batch settings.
+
+## Further processing
+
+PSF photometry and VVV photometric calibration are not part of the current
+`run` or `stack` commands. They can be added after detector stacks are produced
+and the SCAMP/SWarp setup has been validated against the observing data.

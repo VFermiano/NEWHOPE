@@ -55,13 +55,24 @@ def test_download_creates_run_dir_and_passes_it_on(tmp_path, monkeypatch):
     def fake_download(acq, outdir, dry_run=False):
         seen.update(acq=acq, outdir=outdir)
         from newhope_pipeline.acquisition.noirlab import DownloadResult
+
         return DownloadResult()
 
     monkeypatch.setattr("newhope_pipeline.cli.download_night", fake_download)
-    res = CliRunner().invoke(app, [
-        "download", "--config-path", str(_write_config(tmp_path)),
-        "--base-dir", str(tmp_path / "out"), "--proposal", "P1", "--night", "2025-05-13",
-    ])
+    res = CliRunner().invoke(
+        app,
+        [
+            "download",
+            "--config-path",
+            str(_write_config(tmp_path)),
+            "--base-dir",
+            str(tmp_path / "out"),
+            "--proposal",
+            "P1",
+            "--night",
+            "2025-05-13",
+        ],
+    )
     assert res.exit_code == 0, res.output
     assert seen["outdir"] == tmp_path / "out" / "P1_2025-05-13" / "raw"
     assert seen["outdir"].is_dir()
@@ -79,23 +90,50 @@ def test_run_reads_from_same_run_dir(tmp_path, monkeypatch):
         def __init__(self, stages, manifest_path):
             captured["manifest"] = manifest_path
             captured["dark_dir"] = stages[0].config.dark_dir
+            captured["stage_names"] = [stage.name for stage in stages]
             captured["workers"] = stages[0].n_workers
             captured["batch_size"] = stages[0].batch_size
+
         def run(self, frames):
             captured["n"] = len(frames)
             return frames
 
     monkeypatch.setattr("newhope_pipeline.cli.Pipeline", FakePipeline)
-    res = CliRunner().invoke(app, [
-        "run", "--config-path", str(_write_config(tmp_path)),
-        "--base-dir", str(tmp_path / "out"), "--proposal", "P1", "--night", "2025-05-13",
-        "--workers", "2", "--batch-size", "3",
-    ])
+    monkeypatch.setattr("newhope_pipeline.cli.check_astrometry_tools", lambda *_: None)
+    monkeypatch.setattr("newhope_pipeline.cli.check_stacking_tools", lambda *_: None)
+    res = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "--config-path",
+            str(_write_config(tmp_path)),
+            "--base-dir",
+            str(tmp_path / "out"),
+            "--proposal",
+            "P1",
+            "--night",
+            "2025-05-13",
+            "--workers",
+            "2",
+            "--batch-size",
+            "3",
+        ],
+    )
     assert res.exit_code == 0, res.output
     assert captured["n"] == 1
-    assert captured["manifest"] == tmp_path / "out" / "P1_2025-05-13" / "pipeline_state.json"
+    assert (
+        captured["manifest"]
+        == tmp_path / "out" / "P1_2025-05-13" / "pipeline_state.json"
+    )
     assert captured["dark_dir"] == raw
     assert captured["workers"] == 2 and captured["batch_size"] == 3
+    assert captured["stage_names"] == [
+        "dark_subtraction",
+        "flat_fielding",
+        "sky_subtraction",
+        "astrometric_calibration",
+        "stacking",
+    ]
 
 
 def test_run_help_shows_memory_controls():
@@ -106,18 +144,37 @@ def test_run_help_shows_memory_controls():
 
 
 def test_missing_proposal_and_night_errors(tmp_path):
-    res = CliRunner().invoke(app, ["run", "--config-path", str(_write_config(tmp_path))])
+    res = CliRunner().invoke(
+        app, ["run", "--config-path", str(_write_config(tmp_path))]
+    )
     assert res.exit_code != 0
 
 
 def test_force_message_shown_on_every_task(tmp_path, monkeypatch):
     from newhope_pipeline.acquisition.noirlab import DownloadResult
-    monkeypatch.setattr("newhope_pipeline.cli.download_night", lambda *a, **k: DownloadResult())
-    res = CliRunner().invoke(app, [
-        "download", "--config-path", str(_write_config(tmp_path)),
-        "--base-dir", str(tmp_path), "--proposal", "P1", "--night", "2025-05-13",
-    ])
+
+    monkeypatch.setattr(
+        "newhope_pipeline.cli.download_night", lambda *a, **k: DownloadResult()
+    )
+    res = CliRunner().invoke(
+        app,
+        [
+            "download",
+            "--config-path",
+            str(_write_config(tmp_path)),
+            "--base-dir",
+            str(tmp_path),
+            "--proposal",
+            "P1",
+            "--night",
+            "2025-05-13",
+        ],
+    )
     assert "may the force be with you" in res.output.lower()
 
-    res = CliRunner().invoke(app, ["run", "--config-path", str(_write_config(tmp_path))])
-    assert "may the force be with you" in res.output.lower()  # even when the run then errors out
+    res = CliRunner().invoke(
+        app, ["run", "--config-path", str(_write_config(tmp_path))]
+    )
+    assert (
+        "may the force be with you" in res.output.lower()
+    )  # even when the run then errors out
