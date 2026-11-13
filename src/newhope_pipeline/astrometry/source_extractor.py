@@ -23,6 +23,8 @@ def run_sextractor(
     threshold_sigma: float,
     minimum_area: int,
     timeout_seconds: float,
+    gain: float | None = None,
+    saturation_level: float | None = None,
 ) -> Path:
     """Create a SCAMP-compatible FITS_LDAC source catalog."""
     image_path = Path(image_path).resolve()
@@ -68,6 +70,10 @@ def run_sextractor(
         "-WRITE_XML",
         "N",
     ]
+    if gain is not None:
+        command.extend(("-GAIN", str(gain)))
+    if saturation_level is not None:
+        command.extend(("-SATUR_LEVEL", str(saturation_level)))
     logger.info("Running SExtractor for %s", image_path.name)
     logger.debug("SExtractor command: %s", command)
     try:

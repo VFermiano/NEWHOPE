@@ -65,6 +65,12 @@ newhope-pipeline download --set-credentials
 newhope-pipeline download --base-dir /data/newfirm --proposal 2025A-599150 --night 2025-05-13
 newhope-pipeline download --base-dir /data/newfirm --proposal 2025A-599150 --night 2025-05-13 --dry-run  # list matches first
 
+# filter science frames by the NOIRLab OBJECT field, keeping same-night calibrations
+newhope-pipeline download --base-dir /data/newfirm --proposal 2025A-599150 --night 2025-05-13 --object-name "NGC 1234"
+
+# fetch only same-night dark and dflat frames into this run's raw/ directory
+newhope-pipeline download --base-dir /data/newfirm --proposal 2025A-599150 --night 2025-05-13 --calibrations-only
+
 # or download, then run the pipeline in one go
 newhope-pipeline run --base-dir /data/newfirm --proposal 2025A-599150 --night 2025-05-13 --download
 ```
@@ -72,7 +78,13 @@ newhope-pipeline run --base-dir /data/newfirm --proposal 2025A-599150 --night 20
 This fetches every science image for that proposal/night plus same-night
 darks/flats for that instrument+telescope (calibrations are archive-wide,
 not tied to a single proposal), verifying checksums on re-runs so it's
-safe to interrupt and resume. See `src/newhope_pipeline/acquisition/noirlab.py`
+safe to interrupt and resume. `--object-name` restricts the science search to
+an exact NEWFIRM `OBJECT` header value while still fetching calibrations.
+`--calibrations-only` skips the science search and fetches just dark/dflat
+frames for the requested night; it still uses the proposal and night to choose
+the run folder, so it can add calibrations alongside science files already in
+that folder's `raw/` directory. The same filters can be set under `acquisition:`
+in the config for `run --download`. See `src/newhope_pipeline/acquisition/noirlab.py`
 for the credential lookup order and auth details; `acquisition:` is
 optional -- omit it and put your frames in `<base-dir>/<proposal>_<night>/raw/` yourself.
 
@@ -235,7 +247,12 @@ and `stacking:` in `configs/default.yaml`. Adjust the SExtractor threshold and S
 distortion degree after inspecting catalogs and astrometric residuals for the
 observing data. If reference-catalog network access is unavailable, set
 `astrometry.reference_catalog: FILE` and provide a SCAMP-compatible local catalog
-with `astrometry.reference_catalog_path`.
+with `astrometry.reference_catalog_path`. The SCAMP configuration bounds each
+VizieR request with `REF_TIMEOUT`; if your network can reach a different
+SCAMP-compatible VizieR mirror, set `astrometry.scamp_parameters.REF_SERVER` to
+that host. For remote catalogs, the pipeline relays SCAMP requests through a
+short-lived loopback service that adds a User-Agent header accepted by current
+VizieR mirrors.
 
 SExtractor, SCAMP, and SWarp are external programs and are not installed by the
 Python package. Check availability with `sex -v`, `scamp -v`, and `swarp -v`, then
@@ -254,6 +271,39 @@ batch settings.
 
 ## Further processing
 
-PSF photometry and VVV photometric calibration are not part of the current
-`run` or `stack` commands. They can be added after detector stacks are produced
-and the SCAMP/SWarp setup has been validated against the observing data.
+### PSF photometry and VVV calibration
+
+PSF photometry runs on each detector extension in the SCAMP-calibrated MEF files.
+SExtractor selects sources, Photutils builds an empirical PSF from isolated,
+unsaturated stars, and PSF fitting writes one source CSV and one PSF FITS model
+per detector. VVV calibration crossmatches those source coordinates against a
+local VVV FITS table, estimates a sigma-clipped zero point, and writes a second
+CSV with calibrated magnitudes and match diagnostics.
+
+Set `photometry.vvv_catalog_path` to a local VVV catalog with RA/Dec and J, H,
+and Ks magnitudes. The pipeline accepts `ra`/`dec` with `mag_1`/`mag_2`/`mag_3`
+as well as the VizieR-style `RAJ2000`/`DEJ2000` and `Jmag`/`Hmag`/`Ksmag` names.
+The existing default configuration keeps photometry disabled until this local
+catalog is set up. To include it in a full `run`, enable `photometry.enabled`.
+To run it later on existing SCAMP products:
+
+```bash
+newhope-pipeline photometry \
+    --proposal 2025B-584787 \
+    --night 2026-05-29 \
+    --base-dir /path/to/data
+```
+
+Instrumental catalogs, PSF models, calibrated catalogs, and signature files are
+written under `processed/psf_photometry/catalogs/` and
+`processed/vvv_calibration/catalogs/`. If a field has too few reference matches,
+the calibrated catalog is still written with `calibration_status` explaining why
+no zero point was applied.
+
+### FITS header normalization
+
+FITS reads now preserve original cards and add canonical `FILTER`, `OBJECT`,
+`EXPTIME`, `DATE-OBS`, `MJD-OBS`, and `DETECTOR` values from common NEWFIRM
+keyword variants. For example, `FILTERS="OPEN _JX JX"` becomes `FILTER="JX"`;
+the original `FILTERS` card remains available for provenance. Existing WCS
+cards are passed through unchanged.

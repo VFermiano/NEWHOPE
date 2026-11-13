@@ -9,26 +9,61 @@ KMOS headers, ported to whatever NEWFIRM's equivalent quirks are.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Iterable
 
 from astropy.io import fits
 
 
 def read_header(path: Path) -> fits.Header:
     with fits.open(path) as hdul:
-        return hdul[0].header.copy()
+        return normalize_header(hdul[0].header)
 
 def read_extension_headers(path: Path) -> list[fits.Header]:
     """Headers of every image extension, in file order"""
     with fits.open(path) as hdul:
-        return [h.header.copy() for h in hdul[1:] if isinstance(h, (fits.ImageHDU, fits.CompImageHDU))]
+        return [
+            normalize_header(h.header)
+            for h in hdul[1:]
+            if isinstance(h, (fits.ImageHDU, fits.CompImageHDU))
+        ]
 
 def normalize_header(header: fits.Header) -> fits.Header:
-    """Normalize NEWFIRM header keywords to a single consistent schema.
+    """Return a copy with common NEWFIRM keyword variants canonicalized.
 
-    TODO: fill in with the specific keyword mappings/renames your
-    reduction scripts currently rely on (filter name variants, exptime
-    units/precision, WCS placeholder keywords before astrometry runs,
-    etc.) so every downstream stage can assume one schema instead of
-    handling raw-header edge cases itself.
+    The original cards are kept for provenance. Canonical values are added
+    only when the canonical card is missing or blank, so instrument-specific
+    metadata and WCS cards are left intact.
     """
-    return header
+    normalized = header.copy()
+
+    def first_value(keys: Iterable[str]):
+        for key in keys:
+            value = normalized.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text and text.casefold() not in {"unknown", "none", "n/a", "null"}:
+                return value
+        return None
+
+    aliases = {
+        "FILTER": ("FILTER", "FILTNAME", "FILTER1", "FILTERS", "FILTER_NAME"),
+        "OBJECT": ("OBJECT", "FIELD", "TARGNAME", "OBJNAME", "TARGET"),
+        "EXPTIME": ("EXPTIME", "EXPOSURE", "TELAPSE"),
+        "DATE-OBS": ("DATE-OBS", "DATEOBS", "DATE_OBS"),
+        "MJD-OBS": ("MJD-OBS", "MJDOBS", "MJD_OBS"),
+        "DETECTOR": ("DETECTOR", "CCDNAME", "DETECTOR_ID"),
+    }
+    for canonical, keys in aliases.items():
+        value = first_value(keys)
+        if value is None:
+            continue
+        if canonical == "FILTER":
+            # NEWFIRM's FILTERS card may contain a wheel description followed
+            # by the actual band, for example "OPEN _JX JX".
+            tokens = str(value).replace(",", " ").split()
+            if tokens:
+                value = tokens[-1]
+        normalized[canonical] = value
+
+    return normalized

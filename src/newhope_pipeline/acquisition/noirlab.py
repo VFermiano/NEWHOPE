@@ -191,9 +191,15 @@ class NoirlabClient:
     # ---------------------------------------------------------------
     # Search
     # ---------------------------------------------------------------
-    def _run_search(self, search_clauses: list, limit: int, rectype: str = "file") -> list[dict]:
+    def _run_search(
+        self,
+        search_clauses: list,
+        limit: int,
+        rectype: str = "file",
+        outfields: list[str] | None = None,
+    ) -> list[dict]:
         session = self._require_session()
-        query = {"outfields": OUTFIELDS, "search": search_clauses}
+        query = {"outfields": outfields or OUTFIELDS, "search": search_clauses}
         url = f"{ADSURL}/find/?rectype={rectype}&limit={limit}"
         auth_header = None
         if isinstance(getattr(session, "headers", None), MutableMapping):
@@ -212,7 +218,14 @@ class NoirlabClient:
         return resp.json()[1:]  # first element of the response is query metadata, not a row
 
     def search_science(
-        self, instrument: str, telescope: str, proposal: str, night: str, proctype: str, limit: int
+        self,
+        instrument: str,
+        telescope: str,
+        proposal: str,
+        night: str,
+        proctype: str,
+        limit: int,
+        object_name: str | None = None,
     ) -> list[dict]:
         clauses = [
             ["instrument", instrument],
@@ -222,6 +235,9 @@ class NoirlabClient:
         ]
         if proctype:
             clauses.append(["proc_type", proctype])
+        if object_name and object_name.strip():
+            clauses.append(["OBJECT", object_name.strip()])
+            return self._run_search(clauses, limit, outfields=[*OUTFIELDS, "OBJECT"])
         return self._run_search(clauses, limit)
 
     def search_calibrations(
@@ -353,6 +369,10 @@ def download_night(
     """
     if not cfg.proposal or not cfg.night:
         raise AcquisitionError("acquisition.proposal and acquisition.night are required to download.")
+    if cfg.calibrations_only and cfg.object_name:
+        raise AcquisitionError("object_name cannot be used together with calibrations_only.")
+    if cfg.calibrations_only and cfg.skip_calibrations:
+        raise AcquisitionError("calibrations_only cannot be used together with skip_calibrations.")
 
     client = NoirlabClient()
     client.verify_api()
@@ -360,13 +380,26 @@ def download_night(
     logger.info("Logging in to NOIRLab Astro Data Archive...")
     client.login(email, password)
 
-    logger.info(
-        "Searching science images: instrument=%s telescope=%s proposal=%s night=%s proc_type=%s",
-        cfg.instrument, cfg.telescope, cfg.proposal, cfg.night, cfg.proctype or "(any)",
-    )
-    science_rows = client.search_science(
-        cfg.instrument, cfg.telescope, cfg.proposal, cfg.night, cfg.proctype, cfg.limit
-    )
+    science_rows: list[dict] = []
+    if not cfg.calibrations_only:
+        logger.info(
+            "Searching science images: instrument=%s telescope=%s proposal=%s night=%s proc_type=%s object=%s",
+            cfg.instrument,
+            cfg.telescope,
+            cfg.proposal,
+            cfg.night,
+            cfg.proctype or "(any)",
+            cfg.object_name or "(any)",
+        )
+        science_rows = client.search_science(
+            cfg.instrument,
+            cfg.telescope,
+            cfg.proposal,
+            cfg.night,
+            cfg.proctype,
+            cfg.limit,
+            object_name=cfg.object_name,
+        )
     logger.info("-> %d science files found.", len(science_rows))
 
     calib_rows: list[dict] = []

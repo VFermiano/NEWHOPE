@@ -24,6 +24,7 @@ from typing import Callable, Iterator, Optional, Sequence
 import numpy as np
 from astropy.io import fits
 
+from ..io.fits_io import normalize_header
 from .exceptions import PipelineError
 
 # Keywords that describe how the on-disk integers were scaled. After we
@@ -108,7 +109,7 @@ class FrameReference:
         logger.debug("Reading FITS metadata from %s", path)
         extensions: list[ExtensionReference] = []
         with fits.open(path, memmap=False, lazy_load_hdus=False) as hdul:
-            primary_header = hdul[0].header.copy()
+            primary_header = normalize_header(hdul[0].header)
             file_size = path.stat().st_size
             if int(primary_header.get("NAXIS", 0)) > 0:
                 raise PipelineError(
@@ -118,7 +119,7 @@ class FrameReference:
             for index, hdu in enumerate(hdul):
                 if index == 0 or not isinstance(hdu, (fits.ImageHDU, fits.CompImageHDU)):
                     continue
-                header = hdu.header.copy()
+                header = normalize_header(hdu.header)
                 if int(header.get("NAXIS", 0)) != 2:
                     continue
                 shape = (int(header["NAXIS2"]), int(header["NAXIS1"]))
@@ -317,7 +318,7 @@ class Frame:
                 f"{path.name}: requested missing image extension(s) {sorted(unknown_indices)}"
             )
         with fits.open(path, memmap=False, lazy_load_hdus=False) as hdul:
-            primary_header = hdul[0].header.copy()
+            primary_header = normalize_header(hdul[0].header)
             for descriptor in reference.extensions:
                 if descriptor.index not in selected_indices:
                     continue

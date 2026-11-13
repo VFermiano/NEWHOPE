@@ -21,6 +21,11 @@ from .core.exceptions import AcquisitionError
 from .core.frame import FrameCollection
 from .core.pipeline import Pipeline
 from .io.decompress import uncompress_directory
+from .photometry.psf_photometry import (
+    PSFPhotometryStage,
+    check_photometry_tools,
+)
+from .photometry.vvv_calibration import VVVCalibrationStage
 from .reduction.dark import DarkSubtraction
 from .reduction.flat import FlatFielding
 from .reduction.sky import SkySubtraction
@@ -121,6 +126,16 @@ def download(
     ),
     config_path: Path = typer.Option(Path("configs/default.yaml")),
     dry_run: bool = typer.Option(False, help="List matches without downloading"),
+    object_name: str | None = typer.Option(
+        None,
+        "--object-name",
+        help="Only download science frames whose OBJECT header matches this name",
+    ),
+    calibrations_only: bool = typer.Option(
+        False,
+        "--calibrations-only",
+        help="Download only same-night dark and dflat calibration frames",
+    ),
     set_credentials: bool = typer.Option(
         False,
         "--set-credentials",
@@ -131,7 +146,9 @@ def download(
 
     Files are saved to <base-dir>/<proposal>_<night>/raw/, which is created
     if it doesn't exist. Pass the same --base-dir/--proposal/--night to
-    `run` and it will keep working inside that same run directory.
+    `run` and it will keep working inside that same run directory. Use
+    --object-name to filter science frames by their OBJECT header, or
+    --calibrations-only to fetch only dark/dflat frames for that night.
     """
     handlers = _setup_logging()
     try:
@@ -144,8 +161,24 @@ def download(
         config = PipelineConfig.from_yaml(config_path)
         proposal, night = _resolve_target(config, proposal, night, config_path)
 
-        acquisition = (config.acquisition or AcquisitionConfig()).model_copy(
-            update={"proposal": proposal, "night": night}
+        acquisition_base = config.acquisition or AcquisitionConfig()
+        if (calibrations_only or acquisition_base.calibrations_only) and (
+            object_name or acquisition_base.object_name
+        ):
+            raise typer.BadParameter(
+                "--calibrations-only cannot be combined with an object-name filter."
+            )
+        acquisition = acquisition_base.model_copy(
+            update={
+                "proposal": proposal,
+                "night": night,
+                "object_name": (
+                    object_name.strip() or None
+                    if object_name is not None
+                    else acquisition_base.object_name
+                ),
+                "calibrations_only": calibrations_only or acquisition_base.calibrations_only,
+            }
         )
         paths = config.resolve_paths(
             proposal, night, base_dir=base_dir, create=not dry_run
@@ -259,6 +292,8 @@ def run(
         # decompression, or reduction work begins.
         check_astrometry_tools(config.astrometry)
         check_stacking_tools(config.stacking)
+        if config.photometry.enabled:
+            check_photometry_tools(config.photometry, config.astrometry)
 
         if download_first:
             acquisition = (config.acquisition or AcquisitionConfig()).model_copy(
@@ -357,10 +392,31 @@ def run(
                 n_workers=worker_count,
                 batch_size=selected_batch_size,
             ),
+        ]
+        if config.photometry.enabled:
+            stages.extend(
+                [
+                    PSFPhotometryStage(
+                        config.photometry,
+                        config.astrometry,
+                        n_workers=worker_count,
+                        batch_size=selected_batch_size,
+                    ),
+                    VVVCalibrationStage(
+                        config.photometry,
+                        input_catalog_dir=paths.output_dir
+                        / "psf_photometry"
+                        / "catalogs",
+                        n_workers=worker_count,
+                        batch_size=selected_batch_size,
+                    ),
+                ]
+            )
+        stages.append(
             ImageStacking(
                 config.stacking, n_workers=worker_count, batch_size=selected_batch_size
-            ),
-        ]
+            )
+        )
         for stage in stages:
             stage.output_dir = paths.output_dir / stage.name
         logger.info(
@@ -484,6 +540,108 @@ def stack(
     except Exception:
         logger.exception(
             "Standalone stack failed for proposal=%s night=%s", proposal, night
+        )
+        raise
+    finally:
+        _cleanup_logging(handlers)
+
+
+@app.command()
+def photometry(
+    night: str = typer.Option(None, "--night", help="Observing night, YYYY-MM-DD"),
+    proposal: str = typer.Option(
+        None, "--proposal", help="Proposal ID, e.g. 2025A-599150"
+    ),
+    base_dir: Path = typer.Option(
+        None,
+        "--base-dir",
+        help="Parent directory containing the <proposal>_<night>/ run folder",
+    ),
+    config_path: Path = typer.Option(Path("configs/default.yaml")),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable DEBUG logging"),
+    log_file: Path | None = typer.Option(None, "--log-file", help="Log file path"),
+    batch_size: int | None = typer.Option(
+        None, "--batch-size", min=1, help="Maximum number of frame tasks in flight"
+    ),
+    workers: int | None = typer.Option(
+        None, "--workers", min=1, help="Worker processes (default: config n_workers)"
+    ),
+) -> None:
+    """Run PSF photometry and local VVV calibration on astrometric MEF products."""
+    _force_message()
+    config = PipelineConfig.from_yaml(config_path)
+    worker_count = workers if workers is not None else config.n_workers
+    selected_batch_size = batch_size if batch_size is not None else config.batch_size
+    proposal, night = _resolve_target(config, proposal, night, config_path)
+    paths = config.resolve_paths(proposal, night, base_dir=base_dir, create=True)
+    selected_log_file = log_file or paths.run_dir / "pipeline.log"
+    handlers = _setup_logging(verbose=verbose, log_file=selected_log_file)
+    try:
+        check_photometry_tools(config.photometry, config.astrometry)
+        input_dir = paths.output_dir / "astrometric_calibration"
+        if not input_dir.is_dir():
+            raise typer.BadParameter(
+                f"Astrometric products were not found in {input_dir}. Run `newhope-pipeline stack` first."
+            )
+        frames = FrameCollection.from_directory(
+            input_dir, expected_extensions=config.n_extensions
+        )
+        if not frames:
+            raise typer.BadParameter(f"No FITS products found in {input_dir}.")
+        uncalibrated = [
+            frame.path.name
+            for frame in frames
+            if str(frame.header.get("ASTROMET", "")).strip().casefold()
+            not in {"true", "t", "yes", "y", "1"}
+        ]
+        if uncalibrated:
+            raise typer.BadParameter(
+                "Photometry requires SCAMP-calibrated astrometric products; "
+                f"ASTROMET=True is missing from: {', '.join(uncalibrated[:5])}"
+            )
+
+        logger.info(
+            "Starting photometry: proposal=%s, night=%s, input=%s, frames=%d, workers=%d, batch_size=%d",
+            proposal,
+            night,
+            input_dir,
+            len(frames),
+            worker_count,
+            selected_batch_size,
+        )
+        psf_stage = PSFPhotometryStage(
+            config.photometry,
+            config.astrometry,
+            n_workers=worker_count,
+            batch_size=selected_batch_size,
+        )
+        calibration_stage = VVVCalibrationStage(
+            config.photometry,
+            input_catalog_dir=paths.output_dir / "psf_photometry" / "catalogs",
+            n_workers=worker_count,
+            batch_size=selected_batch_size,
+        )
+        psf_stage.output_dir = paths.output_dir / psf_stage.name
+        calibration_stage.output_dir = paths.output_dir / calibration_stage.name
+        result = Pipeline(
+            [psf_stage, calibration_stage], manifest_path=paths.manifest_path
+        ).run(frames)
+        failed = len(frames) - len(result)
+        typer.echo(
+            f"Photometry complete: {len(result)}/{len(frames)} frame(s); "
+            f"catalogs are in {paths.output_dir / 'vvv_calibration' / 'catalogs'}."
+        )
+        if failed:
+            typer.echo(
+                f"{failed} frame(s) failed; see {paths.manifest_path} for details.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
+    except Exception:
+        logger.exception(
+            "Photometry failed for proposal=%s night=%s", proposal, night
         )
         raise
     finally:

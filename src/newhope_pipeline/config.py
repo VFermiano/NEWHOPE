@@ -104,8 +104,57 @@ class StackingConfig(BaseModel):
 
 
 class PhotometryConfig(BaseModel):
-    vvv_catalog_path: Path
-    fwhm_pixels: float = 4.0
+    enabled: bool = False
+    vvv_catalog_path: Path = Path("data/calib/vvv_catalog.fits")
+    sextractor_parameters_path: Path = Path(
+        "configs/sextractor/photometry.param"
+    )
+    detection_threshold_sigma: float = Field(1.5, gt=0)
+    detection_minimum_area: int = Field(5, ge=1)
+    timeout_seconds: float = Field(900.0, gt=0)
+    fwhm_pixels: float = Field(4.0, gt=0)
+    zero_point_keyword: str = "MAGZPT"
+    zero_point_default: float = 25.0
+    saturation_level: float = Field(45000.0, gt=0)
+    gain: float = Field(1.0, ge=0)
+
+    psf_stamp_size: int = Field(25, ge=9)
+    psf_oversampling: int = Field(1, ge=1)
+    psf_maxiters: int = Field(10, ge=1)
+    minimum_psf_stars: int = Field(5, ge=3)
+    min_isolation_pixels: float = Field(30.0, ge=0)
+    edge_margin_fraction: float = Field(0.03, ge=0, lt=0.5)
+    donor_bright_percentile: float = Field(5.0, ge=0, le=100)
+    donor_faint_percentile: float = Field(40.0, ge=0, le=100)
+    max_elongation: float = Field(1.3, gt=0)
+    max_sextractor_flags: int = Field(0, ge=0)
+    reject_near_saturation_fraction: float = Field(0.9, gt=0, le=1)
+    max_psf_stars: int = Field(25, ge=3)
+    fit_shape: int = Field(11, ge=3)
+    aperture_radius_fwhm_mult: float = Field(1.5, gt=0)
+    background_annulus_fwhm_mult: float = Field(5.0, gt=0)
+    background_width_fwhm_mult: float = Field(3.0, gt=0)
+
+    min_crossmatches: int = Field(20, ge=1)
+    min_zero_point_stars: int = Field(10, ge=1)
+    min_vvv_magnitude: float = 12.0
+    match_radius_arcsec: float = Field(0.7, gt=0)
+    sigma_clip_sigma: float = Field(3.0, gt=0)
+    sigma_clip_maxiters: int = Field(5, ge=1)
+    reuse_intermediates: bool = True
+
+    @model_validator(mode="after")
+    def _check_photometry_shapes(self) -> "PhotometryConfig":
+        if self.psf_stamp_size % 2 == 0:
+            raise ValueError("photometry.psf_stamp_size must be odd")
+        if self.fit_shape % 2 == 0:
+            raise ValueError("photometry.fit_shape must be odd")
+        if self.donor_faint_percentile < self.donor_bright_percentile:
+            raise ValueError(
+                "photometry.donor_faint_percentile must be greater than or equal "
+                "to donor_bright_percentile"
+            )
+        return self
 
 
 class AcquisitionConfig(BaseModel):
@@ -123,6 +172,18 @@ class AcquisitionConfig(BaseModel):
     proctype: str = "raw"  # pass "" to not filter on processing type
     limit: int = 5000
     skip_calibrations: bool = False
+    object_name: str | None = None  # exact match against the NEWFIRM OBJECT header
+    calibrations_only: bool = False  # fetch dark/dflat without proposal science frames
+
+    @model_validator(mode="after")
+    def _check_download_selection(self) -> "AcquisitionConfig":
+        if self.object_name is not None:
+            self.object_name = self.object_name.strip() or None
+        if self.calibrations_only and self.object_name:
+            raise ValueError("acquisition.object_name cannot be combined with calibrations_only")
+        if self.calibrations_only and self.skip_calibrations:
+            raise ValueError("acquisition.calibrations_only conflicts with skip_calibrations")
+        return self
 
 
 @dataclass(frozen=True)

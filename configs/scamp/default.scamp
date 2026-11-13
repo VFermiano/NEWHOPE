@@ -1,6 +1,10 @@
 # SCAMP astrometric calibration defaults for NEWFIRM detector images.
 # GAIA-EDR3 is queried as the absolute reference catalog. Network access to
 # the configured SCAMP reference service is required unless using FILE.
+# CfA VizieR mirror. The pipeline relays requests with a User-Agent and
+# retries the official CDS service if this mirror is unavailable.
+REF_SERVER             vizier.cfa.harvard.edu
+REF_TIMEOUT             15
 ASTREF_CATALOG         GAIA-EDR3
 ASTREF_BAND            DEFAULT
 ASTREFMAG_LIMITS       -99.0,99.0
